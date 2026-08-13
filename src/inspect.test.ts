@@ -5,10 +5,18 @@ import type { CommandContext } from "./command.ts";
 import { describeDocuments, inspectCommand, sampleCommand } from "./inspect.ts";
 
 describe("describeDocuments", () => {
-  test("reports top-level field frequencies, BSON types, and common shapes", () => {
+  test("reports nested field frequencies, BSON types, and common shapes", () => {
     const description = describeDocuments([
-      { _id: new ObjectId("64b7f0000000000000000001"), value: Long.fromInt(1) },
-      { _id: new ObjectId("64b7f0000000000000000002"), value: Long.fromInt(2) },
+      {
+        _id: new ObjectId("64b7f0000000000000000001"),
+        value: Long.fromInt(1),
+        profile: { enabled: true },
+      },
+      {
+        _id: new ObjectId("64b7f0000000000000000002"),
+        value: Long.fromInt(2),
+        profile: { enabled: false },
+      },
       { _id: new ObjectId("64b7f0000000000000000003"), value: "one" },
       { _id: new ObjectId("64b7f0000000000000000004"), tags: ["a"] },
     ]);
@@ -22,10 +30,19 @@ describe("describeDocuments", () => {
       frequency: 0.75,
       types: { long: 2, string: 1 },
     });
+    expect(description.common_fields["profile.enabled"]).toEqual({
+      frequency: 0.5,
+      types: { boolean: 2 },
+    });
     expect(description.common_shapes).toHaveLength(3);
     expect(description.common_shapes[0]).toEqual({
       count: 2,
-      fields: { _id: "objectid", value: "long" },
+      fields: {
+        _id: "objectid",
+        profile: "object",
+        "profile.enabled": "boolean",
+        value: "long",
+      },
       frequency: 0.5,
     });
   });

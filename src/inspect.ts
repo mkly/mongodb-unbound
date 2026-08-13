@@ -2,6 +2,7 @@ import type { Document } from "mongodb";
 
 import type { CommandContext, CommandHandler } from "./command.ts";
 import { CliError } from "./errors.ts";
+import { fingerprintDocument } from "./schema-fingerprint.ts";
 
 const DEFAULT_COLLECTION = "default";
 const DEFAULT_SAMPLE_SIZE = 20;
@@ -104,20 +105,6 @@ function parseCollectionAndSize(
   };
 }
 
-function bsonType(value: unknown): string {
-  if (value === null) return "null";
-  if (Array.isArray(value)) return "array";
-  if (value instanceof Date) return "date";
-
-  if (typeof value === "object") {
-    const bsonName = (value as { _bsontype?: unknown })._bsontype;
-    if (typeof bsonName === "string") return bsonName.toLowerCase();
-    return "object";
-  }
-
-  return typeof value;
-}
-
 function ratio(count: number, total: number): number {
   return Number((count / total).toFixed(4));
 }
@@ -133,11 +120,7 @@ export function describeDocuments(
   >();
 
   for (const document of documents) {
-    const fields = Object.fromEntries(
-      Object.keys(document)
-        .sort()
-        .map((field) => [field, bsonType(document[field])]),
-    );
+    const { fields, fingerprint } = fingerprintDocument(document);
 
     for (const [field, type] of Object.entries(fields)) {
       fieldCounts.set(field, (fieldCounts.get(field) ?? 0) + 1);
@@ -146,9 +129,11 @@ export function describeDocuments(
       fieldTypes.set(field, types);
     }
 
-    const key = JSON.stringify(fields);
-    const current = shapes.get(key);
-    shapes.set(key, { count: (current?.count ?? 0) + 1, fields });
+    const current = shapes.get(fingerprint);
+    shapes.set(fingerprint, {
+      count: (current?.count ?? 0) + 1,
+      fields,
+    });
   }
 
   const total = documents.length;
