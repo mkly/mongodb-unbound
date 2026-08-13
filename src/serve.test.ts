@@ -103,6 +103,37 @@ describe("serve HTTP surface", () => {
       fingerprint: 'document{"name":string,"score":number}',
     });
   });
+
+  test("keeps ingesting when a subscriber throws and drops only that subscriber", () => {
+    const model = new ObservatoryModel();
+    const healthy: number[] = [];
+    let failures = 0;
+    model.subscribe(() => {
+      failures += 1;
+      throw new Error("browser went away");
+    });
+    model.subscribe((snapshot) =>
+      healthy.push(snapshot.observatory.activity.length),
+    );
+
+    const event = (id: string) =>
+      ({
+        kind: "activity",
+        id,
+        timestamp: "2026-08-13T20:00:00.000Z",
+        provenance: "mongodb",
+        operation: "insert",
+        collection: "records",
+        document: { name: "Ada" },
+      }) as const;
+
+    expect(() => model.ingest(event("mongo-1"))).not.toThrow();
+    expect(() => model.ingest(event("mongo-2"))).not.toThrow();
+
+    expect(failures).toBe(1);
+    expect(healthy).toEqual([1, 2]);
+    expect(model.snapshot().observatory.activity).toHaveLength(2);
+  });
 });
 
 describe("long-running command lifecycle", () => {

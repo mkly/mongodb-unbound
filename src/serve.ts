@@ -159,8 +159,15 @@ export class ObservatoryModel {
       this.events.push(record);
       if (this.events.length > MAX_ACTIVITY) this.events.shift();
     }
+    if (this.listeners.size === 0) return;
     const snapshot = this.snapshot();
-    for (const listener of this.listeners) listener(snapshot);
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(snapshot);
+      } catch {
+        this.listeners.delete(listener);
+      }
+    }
   }
 
   subscribe(listener: (snapshot: ObservatorySnapshot) => void): () => void {

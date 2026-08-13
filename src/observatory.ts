@@ -321,21 +321,25 @@ export function renderSchemaObservatory(
       const agentLabel = (agents) => agents.length ? agents.join(", ") : "unknown attribution";
       const agentKey = (agents) => agents.slice().sort().join(", ");
       const agentColors = ["var(--cyan)", "var(--accent)", "var(--pink)", "var(--blue)"];
-      const agentKeys = [...new Set(data.fingerprints.map((row) => agentKey(row.agents)))].filter(Boolean).sort();
+      let agentKeys = [];
       const agentColor = (agents) => { const index = agentKeys.indexOf(agentKey(agents)); return index === -1 ? "var(--muted)" : agentColors[index % agentColors.length]; };
 
       const option = (value) => '<option value="' + escapeHtml(value) + '">' + escapeHtml(value) + '</option>';
-      const collections = [...new Set([...data.activity, ...data.fingerprints].map((row) => row.collection))].sort();
-      const allRows = [...data.activity, ...data.fingerprints, ...data.adoption, ...data.field_agent, ...data.trends];
-      const runs = [...new Set(allRows.map((row) => row.run_id).filter(Boolean))].sort();
-      const tasks = [...new Set(allRows.map((row) => row.task_id).filter(Boolean))].sort();
-      const agents = [...new Set(allRows.flatMap(rowAgents).filter(Boolean))].sort();
-      const conditions = [...new Set(allRows.map((row) => row.condition).filter(Boolean))].sort();
-      collectionFilter.insertAdjacentHTML("beforeend", collections.map(option).join(""));
-      runFilter.insertAdjacentHTML("beforeend", runs.map(option).join(""));
-      taskFilter.insertAdjacentHTML("beforeend", tasks.map(option).join(""));
-      agentFilter.insertAdjacentHTML("beforeend", agents.map(option).join(""));
-      conditionFilter.insertAdjacentHTML("beforeend", conditions.map(option).join(""));
+      function syncOptions(select, values) {
+        const selected = select.value;
+        const all = select.options[0].outerHTML;
+        select.innerHTML = all + values.map(option).join("");
+        select.value = values.includes(selected) ? selected : "";
+      }
+      function syncFilters() {
+        agentKeys = [...new Set(data.fingerprints.map((row) => agentKey(row.agents)))].filter(Boolean).sort();
+        const allRows = [...data.activity, ...data.fingerprints, ...data.adoption, ...data.field_agent, ...data.trends];
+        syncOptions(collectionFilter, [...new Set([...data.activity, ...data.fingerprints].map((row) => row.collection).filter(Boolean))].sort());
+        syncOptions(runFilter, [...new Set(allRows.map((row) => row.run_id).filter(Boolean))].sort());
+        syncOptions(taskFilter, [...new Set(allRows.map((row) => row.task_id).filter(Boolean))].sort());
+        syncOptions(agentFilter, [...new Set(allRows.flatMap(rowAgents).filter(Boolean))].sort());
+        syncOptions(conditionFilter, [...new Set(allRows.map((row) => row.condition).filter(Boolean))].sort());
+      }
 
       function renderActivity() {
         const rows = filtered(data.activity).slice().sort((a, b) => b.timestamp.localeCompare(a.timestamp));
@@ -381,13 +385,16 @@ export function renderSchemaObservatory(
       tabs.forEach((tab, index) => { tab.addEventListener("click", () => selectTab(tab)); tab.addEventListener("keydown", (event) => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length; selectTab(tabs[next]); }); });
 
       window.unboundedObservatory = {
-        pushEvent(event) { data.activity.push(event); renderActivity(); },
-        replaceSnapshot(snapshot) { Object.assign(data, snapshot); render(); }
+        pushEvent(event) { data.activity.push(event); syncFilters(); renderActivity(); },
+        replaceSnapshot(snapshot) { Object.assign(data, snapshot); syncFilters(); render(); }
       };
-      fetch("/v1/snapshot").then((response) => response.json()).then((snapshot) => window.unboundedObservatory.replaceSnapshot(snapshot.observatory)).catch(() => {});
-      const events = new EventSource("/v1/events");
-      events.addEventListener("snapshot", (event) => window.unboundedObservatory.replaceSnapshot(JSON.parse(event.data).observatory));
+      syncFilters();
       render();
+      fetch("/v1/snapshot").then((response) => response.json()).then((snapshot) => window.unboundedObservatory.replaceSnapshot(snapshot.observatory)).catch(() => {});
+      if (typeof EventSource === "function") {
+        const events = new EventSource("/v1/events");
+        events.addEventListener("snapshot", (event) => { try { window.unboundedObservatory.replaceSnapshot(JSON.parse(event.data).observatory); } catch { /* ignore malformed frame */ } });
+      }
     })();
   </script>
 </body>

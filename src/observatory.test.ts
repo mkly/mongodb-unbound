@@ -47,6 +47,21 @@ describe("schema observatory browser interface", () => {
     expect(html).not.toContain("colors[index % colors.length]");
   });
 
+  test("rebuilds filter options from every live snapshot without losing a selection", () => {
+    const html = renderSchemaObservatory();
+
+    expect(html).toContain(
+      "replaceSnapshot(snapshot) { Object.assign(data, snapshot); syncFilters(); render(); }",
+    );
+    expect(html).toContain(
+      "data.activity.push(event); syncFilters(); renderActivity();",
+    );
+    expect(html).toContain(
+      'select.value = values.includes(selected) ? selected : "";',
+    );
+    expect(html).toContain('typeof EventSource === "function"');
+  });
+
   test("escapes fixture payloads and never requires document values", () => {
     const hostileFixture: ObservatoryFixture = {
       activity: [],
