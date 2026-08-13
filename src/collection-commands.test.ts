@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Db } from "mongodb";
+import { type Db, Int32 } from "mongodb";
 
 import {
   collectionsCommand,
@@ -120,10 +120,12 @@ describe("create-index", () => {
         '{"unique":true}',
       ]),
     ).toEqual({ collection: "orders", index: "orders_index" });
+    // parseEjson is canonical, so a plain -1 direction arrives as BSON Int32;
+    // the driver serializes that to the same int32 the server expects.
     expect(calls.createdIndexes).toEqual([
       {
         collection: "orders",
-        keys: { placedAt: -1 },
+        keys: { placedAt: new Int32(-1) },
         options: { unique: true },
       },
     ]);
