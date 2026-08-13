@@ -7,6 +7,11 @@ export interface MongoConnection {
   db: Db;
 }
 
+export type ConnectionRunner = <T>(
+  config: ConnectionConfig,
+  callback: (connection: MongoConnection) => Promise<T>,
+) => Promise<T>;
+
 export async function withMongoConnection<T>(
   config: ConnectionConfig,
   callback: (connection: MongoConnection) => Promise<T>,

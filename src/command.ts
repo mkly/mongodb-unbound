@@ -12,16 +12,35 @@ export interface CommandContext {
 }
 
 export interface CommandHandler {
+  mode?: "one-shot";
   name: string;
   run(context: CommandContext, args: readonly string[]): Promise<unknown>;
   summary: string;
   usage?: string;
 }
 
+export type ShutdownSignal = "SIGINT" | "SIGTERM";
+
+export interface LongRunningCommandHandler {
+  mode: "long-running";
+  name: string;
+  run(
+    context: CommandContext,
+    args: readonly string[],
+    waitForShutdown: () => Promise<ShutdownSignal>,
+  ): Promise<void>;
+  summary: string;
+  usage?: string;
+}
+
+export type RegisteredCommandHandler =
+  | CommandHandler
+  | LongRunningCommandHandler;
+
 export function createCommandRegistry(
-  handlers: readonly CommandHandler[],
-): ReadonlyMap<string, CommandHandler> {
-  const registry = new Map<string, CommandHandler>();
+  handlers: readonly RegisteredCommandHandler[],
+): ReadonlyMap<string, RegisteredCommandHandler> {
+  const registry = new Map<string, RegisteredCommandHandler>();
   for (const handler of handlers) {
     if (registry.has(handler.name)) {
       throw new Error(`Duplicate command handler: ${handler.name}`);

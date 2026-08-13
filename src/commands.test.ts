@@ -27,6 +27,7 @@ describe("standalone command registry", () => {
       "create-collection",
       "indexes",
       "create-index",
+      "serve",
     ]);
     expect(new Set(commandHandlers.map(({ name }) => name)).size).toBe(
       commandHandlers.length,

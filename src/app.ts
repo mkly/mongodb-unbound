@@ -1,17 +1,23 @@
 import { parseArguments } from "./args.ts";
-import { createCommandRegistry, type CommandHandler } from "./command.ts";
+import {
+  createCommandRegistry,
+  type RegisteredCommandHandler,
+  type ShutdownSignal,
+} from "./command.ts";
 import { resolveConnectionConfig } from "./config.ts";
 import { CliError, toCliError } from "./errors.ts";
-import { withMongoConnection } from "./mongo.ts";
+import { type ConnectionRunner, withMongoConnection } from "./mongo.ts";
 import { type OutputWriter, writeError, writeResult } from "./output.ts";
 
 export interface CliRuntime {
+  connect?: ConnectionRunner;
   env: Record<string, string | undefined>;
   stderr: OutputWriter;
   stdout: OutputWriter;
+  waitForShutdown?: () => Promise<ShutdownSignal>;
 }
 
-function helpText(handlers: readonly CommandHandler[]): string {
+function helpText(handlers: readonly RegisteredCommandHandler[]): string {
   const commands = handlers
     .map((handler) => `  ${handler.name.padEnd(20)} ${handler.summary}`)
     .join("\n");
@@ -27,9 +33,24 @@ function helpText(handlers: readonly CommandHandler[]): string {
   ].join("\n");
 }
 
+export function waitForProcessShutdown(): Promise<ShutdownSignal> {
+  return new Promise((resolve) => {
+    const onInterrupt = () => finish("SIGINT");
+    const onTerminate = () => finish("SIGTERM");
+    const finish = (signal: ShutdownSignal) => {
+      process.off("SIGINT", onInterrupt);
+      process.off("SIGTERM", onTerminate);
+      resolve(signal);
+    };
+
+    process.once("SIGINT", onInterrupt);
+    process.once("SIGTERM", onTerminate);
+  });
+}
+
 export async function runCli(
   argv: readonly string[],
-  handlers: readonly CommandHandler[],
+  handlers: readonly RegisteredCommandHandler[],
   runtime: CliRuntime,
 ): Promise<number> {
   try {
@@ -54,19 +75,30 @@ export async function runCli(
     }
 
     const config = resolveConnectionConfig(args, runtime.env);
-    const data = await withMongoConnection(config, ({ client, db }) =>
-      handler.run(
-        {
-          client,
-          config,
-          db,
-          stderr: runtime.stderr,
-          stdout: runtime.stdout,
-        },
-        args.commandArgs,
-      ),
-    );
-    writeResult(runtime.stdout, data);
+    const connect = runtime.connect ?? withMongoConnection;
+    const data = await connect(config, async ({ client, db }) => {
+      const context = {
+        client,
+        config,
+        db,
+        stderr: runtime.stderr,
+        stdout: runtime.stdout,
+      };
+
+      if (handler.mode === "long-running") {
+        await handler.run(
+          context,
+          args.commandArgs,
+          runtime.waitForShutdown ?? waitForProcessShutdown,
+        );
+        return undefined;
+      }
+
+      return handler.run(context, args.commandArgs);
+    });
+    if (handler.mode !== "long-running") {
+      writeResult(runtime.stdout, data);
+    }
     return 0;
   } catch (error) {
     const cliError = toCliError(error);
