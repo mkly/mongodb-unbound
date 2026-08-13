@@ -442,6 +442,41 @@ the fingerprint in shell from a different algorithm (sorted key names only, via
 `python3`), which produced values that could never be compared with `inspect`'s.
 Do not reintroduce a second implementation.
 
+`serve` is bound by the same rule, and broke it once: it keyed its fingerprint
+clusters on `fingerprintDocument().fingerprint` — the long readable signature —
+while telemetry records carry `schema_fingerprint`, the 16 hex hash. The two
+never met, so the Observatory rendered every change-stream document as its own
+cluster labelled `unknown attribution`, and the unwrapped signature strings blew
+out the page horizontally. It now keys on `.hash`; the readable field paths
+survive in the cluster's `fields`. **Anything that clusters schemas — the
+wrapper, `inspect`, `serve` — joins on `hashFingerprint()` and nothing else.**
+
+Run `serve` with one `--telemetry <path>` per agent JSONL file (the flag is
+repeatable). Without it the process still starts and still streams MongoDB, but
+there are no telemetry rows to attribute documents against, so Activity reads
+"No activity for these filters" and every cluster is unattributed:
+
+```sh
+incus exec crabbox-ec2:unbounded-pilot -- su - agent -c '
+cd /work/unbounded-pilot && set -a; . /work/.env; set +a
+T=""; for f in telemetry/pilot-001/*.jsonl; do T="$T --telemetry $f"; done
+setsid nohup ./dist/unbounded-serve --db pilot-001_shared \
+  serve --host 10.50.180.160 --port 3000 $T > /work/logs/serve.log 2>&1 </dev/null &'
+```
+
+`setsid nohup … </dev/null &` is required — without it the server dies when
+`incus exec` returns. The container IP is routable from the laptop over
+WireGuard, so <http://10.50.180.160:3000> opens directly; no proxy device
+needed. To stop it, `pgrep -f "dist/unbounded-serve"` and then `kill <pid>` in a
+*separate* call — `pkill -f` matches its own `su - agent -c` shell and kills the
+session instead.
+
+Never rebuild `dist/unbounded` while a run is in flight. `swarm.py` bind-mounts
+that file into every agent container and a bind mount pins the inode, so
+containers already running keep the old executable while new ones get the new
+one — agents inside the same arm end up on different CLIs. Build to a separate
+outfile (`dist/unbounded-serve`) instead.
+
 Reading `collection` from the output also fixes a leak: the collection argument
 is optional in every command, so `unbounded insert '{"note":"…"}'` used to log
 the whole model-authored document in the `collection` field — exactly the content

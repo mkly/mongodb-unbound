@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runCli } from "./app.ts";
+import { hashFingerprint } from "./schema-fingerprint.ts";
 import {
   createServeCommand,
   createServeRequestHandler,
@@ -100,7 +101,9 @@ describe("serve HTTP surface", () => {
     expect(snapshot.observatory.fingerprints[0]).toMatchObject({
       count: 1,
       fields: ["name:string", "score:number"],
-      fingerprint: 'document{"name":string,"score":number}',
+      // The hash, because that is what telemetry's `schema_fingerprint`
+      // carries and clusters must join across both sources.
+      fingerprint: hashFingerprint('document{"name":string,"score":number}'),
     });
   });
 

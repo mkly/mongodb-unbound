@@ -135,7 +135,12 @@ function structuralEvent(event: ActivityEvent): {
   if (event.document) {
     const result = fingerprintDocument(event.document);
     return {
-      fingerprint: result.fingerprint,
+      // The HASH, not the readable signature. Telemetry records carry
+      // `schema_fingerprint`, which is this same 16 hex digest -- keying on the
+      // readable signature here put change-stream documents and telemetry rows
+      // in disjoint clusters, so every document rendered as "unknown
+      // attribution". The readable paths survive in `fields`.
+      fingerprint: result.hash,
       fields: Object.entries(result.fields).map(
         ([path, type]) => `${path}:${type}`,
       ),
