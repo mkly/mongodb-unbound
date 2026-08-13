@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { runCli } from "./app.ts";
 import {
   createServeCommand,
+  createServeRequestHandler,
   handleServeRequest,
+  ObservatoryModel,
   parseServeOptions,
 } from "./serve.ts";
 
@@ -22,10 +24,24 @@ function memoryWriter() {
 
 describe("serve options", () => {
   test("uses loopback defaults and accepts explicit host and port", () => {
-    expect(parseServeOptions([])).toEqual({ host: "127.0.0.1", port: 3000 });
-    expect(parseServeOptions(["--host=::1", "--port", "8080"])).toEqual({
+    expect(parseServeOptions([])).toEqual({
+      host: "127.0.0.1",
+      port: 3000,
+      telemetryPaths: [],
+    });
+    expect(
+      parseServeOptions([
+        "--host=::1",
+        "--port",
+        "8080",
+        "--telemetry",
+        "one.jsonl",
+        "--telemetry=two.jsonl",
+      ]),
+    ).toEqual({
       host: "::1",
       port: 8080,
+      telemetryPaths: ["one.jsonl", "two.jsonl"],
     });
   });
 
@@ -50,12 +66,42 @@ describe("serve HTTP surface", () => {
 
     const page = handleServeRequest(new Request("http://localhost/"));
     expect(page.status).toBe(200);
-    expect(await page.text()).toContain("Unbounded Schema Observatory");
+    expect(await page.text()).toContain("Schema Observatory");
 
     const write = handleServeRequest(
       new Request("http://localhost/", { method: "POST" }),
     );
     expect(write.status).toBe(405);
+  });
+
+  test("publishes versioned snapshots with canonical schema and explicit unknown attribution", async () => {
+    const model = new ObservatoryModel();
+    model.ingest({
+      kind: "activity",
+      id: "mongo-1",
+      timestamp: "2026-08-13T20:00:00.000Z",
+      provenance: "mongodb",
+      operation: "insert",
+      collection: "records",
+      document: { name: "Ada", score: 42 },
+    });
+    const handler = createServeRequestHandler(model);
+    const response = handler(new Request("http://localhost/v1/snapshot"));
+    const snapshot = await response.json();
+
+    expect(snapshot.api_version).toBe("v1");
+    expect(snapshot.observatory.activity[0]).toMatchObject({
+      agents: [],
+      collection: "records",
+      condition: "",
+      run_id: "",
+      task_id: "",
+    });
+    expect(snapshot.observatory.fingerprints[0]).toMatchObject({
+      count: 1,
+      fields: ["name:string", "score:number"],
+      fingerprint: 'document{"name":string,"score":number}',
+    });
   });
 });
 
@@ -81,7 +127,20 @@ describe("long-running command lifecycle", () => {
       connect: async (_config, callback) => {
         events.push("mongo opened");
         try {
-          return await callback({} as Parameters<typeof callback>[0]);
+          return await callback({
+            db: {
+              listCollections: () => ({ toArray: async () => [] }),
+              watch: () => ({
+                async close() {},
+                async next() {
+                  return { done: true as const, value: undefined };
+                },
+                [Symbol.asyncIterator]() {
+                  return this;
+                },
+              }),
+            },
+          } as unknown as Parameters<typeof callback>[0]);
         } finally {
           events.push("mongo closed");
         }
@@ -98,7 +157,12 @@ describe("long-running command lifecycle", () => {
     expect(exitCode).toBe(0);
     expect(stderr.read()).toBe("");
     expect(JSON.parse(stdout.read())).toEqual({
-      data: { status: "listening", url: "http://127.0.0.1:4100" },
+      data: {
+        collections: [],
+        status: "listening",
+        telemetry: [],
+        url: "http://127.0.0.1:4100",
+      },
       ok: true,
     });
     expect(events).toEqual([
@@ -118,7 +182,20 @@ describe("long-running command lifecycle", () => {
 
     const code = await runCli(["serve"], [serve], {
       connect: async (_config, callback) =>
-        callback({} as Parameters<typeof callback>[0]),
+        callback({
+          db: {
+            listCollections: () => ({ toArray: async () => [] }),
+            watch: () => ({
+              async close() {},
+              async next() {
+                return { done: true as const, value: undefined };
+              },
+              [Symbol.asyncIterator]() {
+                return this;
+              },
+            }),
+          },
+        } as unknown as Parameters<typeof callback>[0]),
       env: { UNBOUNDED_DB: "demo", UNBOUNDED_MONGO_URI: "mongodb://unused" },
       stderr,
       stdout,

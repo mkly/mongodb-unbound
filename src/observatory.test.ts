@@ -56,10 +56,12 @@ describe("schema observatory browser interface", () => {
         {
           agents: [],
           collection: "</script><script>alert(1)</script>",
+          condition: "shared",
           count: 1,
           fields: ["name:string"],
           fingerprint: "safe-shape",
           run_id: "run-1",
+          task_id: "task-1",
         },
       ],
       generated_at: "2026-08-13T20:00:00.000Z",
