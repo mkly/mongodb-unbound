@@ -156,12 +156,24 @@ function changeId(change: MongoChange): string {
   return `mongodb:${stableValue(change.token)}`;
 }
 
+/**
+ * Reduce a document id to the form both sources agree on. A change stream
+ * reports `_id` as a real ObjectId, while the wrapper writes `document_id` as
+ * the bare hex string it scraped from the command's EJSON output, so
+ * correlation has to see past that representation difference.
+ */
+function documentIdKey(documentId: unknown): string {
+  if (documentId instanceof BSON.ObjectId) return documentId.toHexString();
+  if (typeof documentId === "string") return documentId;
+  return stableValue(documentId);
+}
+
 function documentKey(
   collection: string | undefined,
   documentId: unknown,
 ): string | undefined {
   if (!collection || documentId === undefined) return undefined;
-  return `${collection}\u0000${stableValue(documentId)}`;
+  return `${collection}\u0000${documentIdKey(documentId)}`;
 }
 
 function toIsoTimestamp(value: unknown): string | undefined {
@@ -197,6 +209,8 @@ export async function* streamMongoActivity(
   let resumeAfter: unknown;
   const seenTokens = new Set<string>();
   let snapshotsComplete = false;
+  let live: AsyncIterator<MongoChange> | undefined;
+  let pendingChange: Promise<IteratorResult<MongoChange>> | undefined;
 
   while (true) {
     throwIfAborted(options.signal);
@@ -204,7 +218,9 @@ export async function* streamMongoActivity(
       const iterator = adapter
         .watch(collections, { resumeAfter, signal: options.signal })
         [Symbol.asyncIterator]();
+      live = iterator;
       let pending = iterator.next();
+      pendingChange = pending;
 
       if (!snapshotsComplete) {
         for (const collection of collections) {
@@ -230,6 +246,7 @@ export async function* streamMongoActivity(
         const result = await pending;
         if (result.done) return;
         pending = iterator.next();
+        pendingChange = pending;
         const token = stableValue(result.value.token);
         resumeAfter = result.value.token;
         if (seenTokens.has(token)) continue;
@@ -244,8 +261,23 @@ export async function* streamMongoActivity(
         message: `change stream disconnected; reconnecting: ${error instanceof Error ? error.message : String(error)}`,
       };
       await delay(reconnectDelayMs, options.signal);
+    } finally {
+      // Whether we are reconnecting or the consumer walked away mid-yield, this
+      // cursor is finished: close it so the change stream does not outlive the
+      // reader, and absorb the prefetched `next()` so a cursor error arriving
+      // after we stop reading cannot surface as an unhandled rejection.
+      settle(pendingChange);
+      pendingChange = undefined;
+      const closing = live;
+      live = undefined;
+      settle(closing?.return?.());
     }
   }
+}
+
+/** Discard a promise's outcome without leaving an unhandled rejection behind. */
+function settle(promise: PromiseLike<unknown> | undefined): void {
+  void Promise.resolve(promise).catch(() => {});
 }
 
 /** Production adapter for the MongoDB Node driver. It performs only reads. */
@@ -429,7 +461,9 @@ function telemetryRecord(
       typeof record.document === "object" && record.document !== null
         ? (record.document as Document)
         : undefined,
-    fingerprint: nonemptyString(record, "fingerprint"),
+    fingerprint:
+      nonemptyString(record, "schema_fingerprint") ??
+      nonemptyString(record, "fingerprint"),
     success: typeof record.success === "boolean" ? record.success : undefined,
     attribution: {
       runId: nonemptyString(record, "run_id"),
@@ -510,17 +544,27 @@ async function* mergeStreams(
       iterators[index].next().then((result) => ({ index, result })),
     );
   }
-  while (pending.size > 0) {
-    const { index, result } = await Promise.race(pending.values());
-    if (result.done) {
-      pending.delete(index);
-      continue;
+  try {
+    while (pending.size > 0) {
+      const { index, result } = await Promise.race(pending.values());
+      if (result.done) {
+        pending.delete(index);
+        continue;
+      }
+      pending.set(
+        index,
+        iterators[index].next().then((next) => ({ index, result: next })),
+      );
+      yield result.value;
     }
-    pending.set(
-      index,
-      iterators[index].next().then((next) => ({ index, result: next })),
-    );
-    yield result.value;
+  } finally {
+    // A consumer that stops early leaves each source blocked in its own read.
+    // Ask them all to close without waiting for those reads to settle, and
+    // absorb the in-flight `next()` rejections they may produce on the way out.
+    for (const [index, promise] of pending) {
+      settle(promise);
+      settle(iterators[index].return?.());
+    }
   }
 }
 

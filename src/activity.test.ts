@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ObjectId } from "mongodb";
 
 import {
   correlateActivity,
@@ -196,9 +197,96 @@ describe("streamMongoActivity", () => {
     expect(resumes).toEqual([undefined, "one"]);
     expect(records.some((record) => record.kind === "diagnostic")).toBe(true);
   });
+
+  test("closes the change stream when the consumer stops early", async () => {
+    let closed = false;
+    const change: MongoChange = {
+      token: "one",
+      operation: "insert",
+      collection: "notes",
+    };
+    // A hand-rolled iterator, because `return()` on an async generator parked
+    // in an `await` is queued behind that await and would never be observed.
+    const adapter: MongoActivityAdapter = {
+      async snapshot() {
+        return [];
+      },
+      watch() {
+        let delivered = false;
+        const iterator: AsyncIterator<MongoChange> = {
+          next() {
+            if (delivered) return new Promise(() => {});
+            delivered = true;
+            return Promise.resolve({ done: false, value: change });
+          },
+          return() {
+            closed = true;
+            return Promise.resolve({ done: true, value: undefined });
+          },
+        };
+        return { [Symbol.asyncIterator]: () => iterator };
+      },
+    };
+
+    await collect(streamMongoActivity(adapter, { collections: ["notes"] }), 1);
+
+    expect(closed).toBe(true);
+  });
+});
+
+describe("telemetry field contract", () => {
+  test("reads the schema_fingerprint the wrapper actually writes", async () => {
+    const records = await collect(
+      streamJsonlFile("agent.jsonl", {
+        fileAdapter: new ChunkFile([
+          `${telemetry({ schema_fingerprint: "fp-1" })}\n`,
+        ]),
+      }),
+    );
+
+    expect(records[0]).toMatchObject({
+      kind: "activity",
+      fingerprint: "fp-1",
+    });
+  });
 });
 
 describe("activity correlation", () => {
+  test("correlates an ObjectId change with the hex document_id in telemetry", async () => {
+    const id = new ObjectId("64b7f0c9a1b2c3d4e5f60718");
+    async function* records() {
+      yield {
+        kind: "activity" as const,
+        id: "event-1",
+        timestamp: "2026-08-13T20:00:00.000Z",
+        provenance: "telemetry" as const,
+        telemetryType: "db_write" as const,
+        operation: "insert",
+        collection: "notes",
+        documentId: id.toHexString(),
+        attribution: { agentId: "agent-1", condition: "shared" },
+      };
+      yield {
+        kind: "activity" as const,
+        id: "mongodb:token-1",
+        timestamp: "2026-08-13T20:00:01.000Z",
+        provenance: "mongodb" as const,
+        operation: "insert",
+        collection: "notes",
+        documentId: id,
+        document: { _id: id, body: "authoritative" },
+      };
+    }
+
+    const [record] = await collect(correlateActivity(records()));
+
+    expect(record).toMatchObject({
+      kind: "activity",
+      provenance: "correlated",
+      attribution: { agentId: "agent-1" },
+    });
+  });
+
   test("uses MongoDB content and JSONL attribution for a matching write", async () => {
     async function* records() {
       yield {

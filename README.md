@@ -155,7 +155,8 @@ injectable so callers can test or replace the I/O boundary.
 
 An activity record has `kind: "activity"`, a stable `id`, an ISO `timestamp`,
 `provenance` (`mongodb`, `telemetry`, or `correlated`), and an `operation`.
-Collection, document ID/content, fingerprint, success, telemetry type, and the
+Collection, document ID/content, fingerprint (`schema_fingerprint` on the
+wrapper's `db_write` records), success, telemetry type, and the
 run/task/agent/condition attribution are present only when the source supplies
 them. Correlated writes use MongoDB's document content and timestamp together
 with JSONL attribution. Unmatched MongoDB changes remain valid unattributed
