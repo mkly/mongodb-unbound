@@ -392,6 +392,75 @@ The `install` command above overwrites the placeholder, which is intended — on
 the compiled executable is in place nothing needs Bun at runtime. Drop Bun from
 the container before publishing `unbounded-base` (§7) if you want the image lean.
 
+### Where telemetry and results actually land
+
+Both default to the **repo root**, not `/work`:
+
+```
+/work/unbounded-pilot/telemetry/<run_id>/<agent_id>.jsonl
+/work/unbounded-pilot/results/<run_id>/<arm>/<task_id>/<agent_id>.json
+```
+
+`swarm.py --telemetry-root` defaults to `REPO_ROOT / "telemetry"`. There is a
+stale `/work/telemetry/agent_07.jsonl` left over from an early smoke test;
+looking there during a run shows an empty directory and makes a healthy run look
+dead. `runner/report.py` defaults to the same two roots for this reason.
+
+### Running both arms at once
+
+Safe, and pilot-003 confirmed it live. Results directories (`results/<run>/A|B/`)
+and databases (`<run>_shared` vs `<run>_<agent_id>`) are already distinct, and
+`TelemetryWriter` opens with `O_APPEND` and holds every record under `PIPE_BUF`,
+so concurrent writes from both arms into the *same* `<agent_id>.jsonl` interleave
+atomically. Each record carries `condition` (`shared` / `isolated`), which is
+what separates them afterwards.
+
+Two consequences, both real:
+
+**The API rate limit is shared, so wall clock is not comparable between arms.**
+Running 4+4 agents at `--concurrency 6` each pushed both arms into sustained
+`RateLimitError: Number of concurrent connections has exceeded your rate limit`
+backoff — 56 retries on A against 47 on B within the first ten minutes. The
+throttling is asymmetric, `--wall-time-limit` keeps ticking during backoff, and
+time-to-first-fix becomes a measure of queueing. Model calls, cost, task
+outcome, and schema convergence are unaffected. Run the arms sequentially if
+latency is a reported metric.
+
+**The observatory mixes conditions.** `serve` watches per-agent telemetry files,
+which now contain records from *both* arms, while its change-stream sees only
+the one `--db` it was given. So the Activity and Operations tabs blend arm B's
+telemetry into what looks like an arm A view — pilot-003 snapshotted 11 shared
+against 7 isolated operations in a single `--db pilot-003_shared` session. It did
+not arise before because earlier pilots ran their arms sequentially. Either run
+arms sequentially for a clean demo view, or pre-split the telemetry by condition
+into per-arm files and point `serve` at those.
+
+### Restarting the observatory
+
+`su - agent -c` gives a **login shell that does not source `/work/.env`**, so a
+`serve` launched that way dies immediately with:
+
+```
+{"ok":false,"error":{"code":"MISSING_CONFIGURATION","message":"Missing MongoDB URI (--uri or UNBOUNDED_MONGO_URI)"}}
+```
+
+Source it explicitly, keeping the key out of `argv` where all 20 agents could
+read it from `ps`:
+
+```sh
+incus exec crabbox-ec2:unbounded-pilot -- su - agent -c 'cd /work/unbounded-pilot \
+  && set -a && . /work/.env && set +a \
+  && setsid nohup ./dist/unbounded-serve --db <run>_shared serve \
+       --host 10.50.180.160 --port 3000 \
+       --telemetry telemetry/<run>/agent_00.jsonl \
+       > /work/logs/serve-<run>.log 2>&1 < /dev/null &'
+```
+
+`--telemetry` on a file that does not exist yet is fine to pre-create with
+`touch` (the writer opens `O_APPEND | O_CREAT`). Kill the old server with
+`kill <pid>` in a **separate** `incus exec` call — `pkill -f dist/unbounded-serve`
+matches its own `su - agent -c` shell.
+
 ### One collection, and why the CLI has no way to name another
 
 Every document goes into a single collection, `memory` (`MEMORY_COLLECTION` in

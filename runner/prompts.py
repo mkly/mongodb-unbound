@@ -75,11 +75,30 @@ is prescribed; `inspect` and `sample` are how you find out what is there."""
 #: It instructs WHEN to reach for memory, never WHAT to store. Document shape and
 #: wording are what the experiment measures, so prescribing them would destroy
 #: the result.
+#:
+#: The list of moments is deliberate. An earlier version said only "before you
+#: submit, record what you learned", which is a two-write protocol -- read once,
+#: write once -- and that is exactly what the agents did: pilot-003 produced ~1
+#: document per agent, all of them end-of-run summaries carrying `task`,
+#: `analysis`, `solution`, `test_results`. One document per agent is too sparse
+#: to show adoption or convergence over time, because nothing is ever written
+#: while another agent is still working. Naming the moments raises write
+#: frequency without touching document shape: WHEN, still never WHAT.
+#:
+#: Note the cost -- every `unbounded` call spends one step from `--step-limit`.
+#: Raise the limit when raising write frequency, or the extra writes come
+#: straight out of the budget for solving the bug.
 TASK_MEMORY_PROMPT: Final[str] = """\
 
 Before you begin, check `unbounded` for anything relevant to this task; other
-engineers may already have recorded something useful. Before you submit, record
-what you learned. Choose the structure and wording yourself."""
+engineers may already have recorded something useful, and it is worth checking
+again whenever you change direction.
+
+Record what you learn as you learn it, rather than saving it all for the end:
+when you locate the relevant code, when a hypothesis is ruled out, when a test
+fails or passes, when you edit a file, and when you finish. Anything you keep
+only in your own context is lost when this task ends. Choose the structure and
+wording yourself."""
 
 
 def build_instance_prompt(condition: str, base_template: str) -> str:

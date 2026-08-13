@@ -319,7 +319,9 @@ describe("compiled serve command", () => {
           "build",
           "./src/cli.ts",
           "--compile",
-          "--target=bun-linux-x64",
+          // Host-native deliberately: the judge kit's one command runs this
+          // test, and pinning bun-linux-x64 fails it on a macOS laptop.
+          // `bun run build:linux` is what produces the agent-container binary.
           `--outfile=${binary}`,
         ],
         { cwd: join(import.meta.dir, ".."), stderr: "pipe", stdout: "pipe" },

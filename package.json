@@ -7,7 +7,8 @@
     "unbounded": "./src/cli.ts"
   },
   "scripts": {
-    "build": "bun build ./src/cli.ts --compile --target=bun-linux-x64 --outfile ./dist/unbounded",
+    "build": "bun build ./src/cli.ts --compile --outfile ./dist/unbounded",
+    "build:linux": "bun build ./src/cli.ts --compile --target=bun-linux-x64 --outfile ./dist/unbounded",
     "check": "bun run typecheck && bun run lint && bun run format:check",
     "format": "biome format --write .",
     "format:check": "biome format .",
