@@ -118,7 +118,7 @@ export const findCommand: CommandHandler = {
     const parsed = parseFindArguments(args);
     return await context.db
       .collection(parsed.collection)
-      .find(parsed.filter)
+      .find(parsed.filter, { promoteValues: false })
       .limit(parsed.limit)
       .toArray();
   },
@@ -137,7 +137,7 @@ export const getCommand: CommandHandler = {
     const id = parseEjson<unknown>(parsed.values[0], "_id");
     return await context.db
       .collection(parsed.collection)
-      .findOne({ _id: id } as Filter<Document>);
+      .findOne({ _id: id } as Filter<Document>, { promoteValues: false });
   },
 };
 
