@@ -140,26 +140,29 @@ For each benchmark problem, run three conditions.
 same small model
 same task
 separate worktrees
-one shared Unbounded workspace
+one shared MongoDB database
 ```
 
 Example:
 
 ```text
-UNBOUNDED_WORKSPACE=run-001
+UNBOUNDED_DB=run_001_shared
 ```
 
 All twenty agents see the same Unbounded state.
 
 ## B. Isolated Small-Model Population
 
-Exactly the same setup, except each agent has its own memory namespace.
+Exactly the same setup, except the launcher assigns each agent a separate
+MongoDB database. This provides logical isolation for the pilot. If agents
+must not be able to select another database, give each one credentials scoped
+to its assigned database.
 
 ```text
-Agent 1 -> run-002-agent-1
-Agent 2 -> run-002-agent-2
+Agent 1 -> run_002_agent_01
+Agent 2 -> run_002_agent_02
 ...
-Agent 20 -> run-002-agent-20
+Agent 20 -> run_002_agent_20
 ```
 
 Nothing else changes.
@@ -254,6 +257,21 @@ That is intentionally vague about coordination. The agents should discover the r
 # Unbounded CLI Surface
 
 The CLI should be simple enough for small models while remaining structurally neutral.
+
+Unbounded is a standalone MongoDB CLI that a user can put on any agent's
+`$PATH`. It has no concept of experiments, runs, workspaces, swarms, or agent
+identities. The caller supplies a MongoDB URI and database name. Collections
+and documents remain ordinary MongoDB collections and documents.
+
+The pilot launcher owns experiment concerns. It chooses a database for each
+agent process, records the agent and run identifiers, and collects telemetry.
+For the shared condition, the launcher gives every agent the same database
+name. For the isolated condition, it gives each agent a different database
+name.
+
+The reusable CLI accepts the URI and database through flags or environment
+variables such as `UNBOUNDED_MONGO_URI` and `UNBOUNDED_DB`. Database selection
+is generic connection configuration, not a workspace abstraction.
 
 Suggested v1:
 
@@ -507,7 +525,7 @@ for agent_id in range(20):
 
     env = {
         "AGENT_ID": str(agent_id),
-        "UNBOUNDED_WORKSPACE": run_id,
+        "UNBOUNDED_DB": f"{run_id}_shared",
     }
 
     agents.append(
@@ -525,10 +543,12 @@ wait_for_all(agents)
 For the isolated condition:
 
 ```python
-"UNBOUNDED_WORKSPACE": f"{run_id}-{agent_id}"
+"UNBOUNDED_DB": f"{run_id}_agent_{agent_id}"
 ```
 
-That should be nearly the only code difference between the two conditions.
+The launcher uses `AGENT_ID` for prompts and telemetry. The Unbounded
+executable does not read it. Database assignment should be nearly the only
+code difference between the shared and isolated conditions.
 
 ---
 
@@ -607,49 +627,90 @@ If feasible, record whether successful agents consumed or built upon shared memo
 
 Do not build an elaborate telemetry platform.
 
-For every model call, capture:
+Keep telemetry outside the Unbounded executable. The launcher already knows
+the run and agent for each process. It can turn the timestamped agent command
+transcript into operation records. If the harness cannot expose those records,
+use a pilot-only wrapper script that appends JSONL before it invokes the
+standalone executable.
+
+## One stream, four record types
+
+All telemetry is JSONL. Every record carries the same envelope, and `type`
+discriminates the payload. A reader that does not recognize a `type` skips the
+record and reports it as a diagnostic rather than failing.
+
+Envelope, present on every record:
 
 ```text
+type            model_call | unbounded_op | db_write | run_summary
+event_id        uuid, unique per record, for duplicate suppression
+timestamp       RFC 3339, UTC, millisecond precision
 run_id
-task_id
-agent_id
-model
-timestamp
-input_tokens
-output_tokens
-estimated_cost
+task_id         SWE-bench instance id, e.g. pytest-dev__pytest-8365
+agent_id        zero-padded, agent_00 .. agent_19
+condition       shared | isolated | baseline
 ```
 
-For every Unbounded operation:
+`condition` is not optional. Shared-versus-isolated is the experiment, and every
+analysis and dashboard filter groups by it. `task_id` is likewise required
+everywhere, including database writes and run summaries, so a fingerprint can be
+attributed to the problem that produced it.
+
+Per type, in addition to the envelope:
 
 ```text
-run_id
-task_id
-agent_id
-timestamp
-operation
-collection
-success/failure
+model_call      model, input_tokens, output_tokens, estimated_cost, step
+unbounded_op    operation, collection, success, exit_code, duration_ms
+db_write        operation, collection, document_id, fingerprint?
+run_summary     wall_clock_ms, resolved, patch_size_lines, f2p_passed, p2p_passed
 ```
 
-For every database write:
+## Why writes carry an id, not a document
 
-```text
-timestamp
-agent_id
-document
-collection
-```
+The earlier draft put the whole written document in the telemetry record. Three
+reasons not to:
 
-For each run:
+- The dashboard reads documents from the MongoDB change stream, which is
+  authoritative and already carries full content. JSONL is the replay and
+  fixture path, not the primary source.
+- Records are appended by concurrent writers. On Linux an `O_APPEND` write is
+  atomic only up to `PIPE_BUF` (4096 bytes); above that, twenty agents can
+  interleave and corrupt lines. Keeping records small keeps appends atomic.
+- Agent-authored documents are model output. Replaying them into a browser is a
+  content-injection surface, and the interface deliberately does not render
+  document values by default.
 
-```text
-wall-clock duration
-candidate patches
-test results
-```
+`document_id` plus the change stream recovers everything a document field would
+have provided. `fingerprint` is optional and only populated when the writer can
+compute one cheaply; readers must treat its absence as normal.
 
-That is enough for the first analysis.
+## Correlating the two sources
+
+The dashboard sees the same write twice: once from the change stream, once from
+the JSONL. `event_id` deduplicates JSONL against itself on replay; `(collection,
+document_id)` correlates a JSONL record to its change-stream counterpart. When
+both exist, the change stream wins on content and the JSONL supplies the
+attribution the change stream cannot know — `agent_id`, `condition`, `task_id`.
+
+Unattributed change-stream activity is expected and must render as unknown
+attribution rather than being dropped or counted as a zero.
+
+## Who writes what
+
+The Unbounded executable writes no telemetry. It has no run, agent, or
+experiment concepts, and that stays true.
+
+- `model_call` and `run_summary` come from the launcher, which owns the
+  mini-swe-agent loop and reads token and cost counters off the model object.
+- `unbounded_op` and `db_write` come from the pilot wrapper that occupies
+  `unbounded` on each agent's `PATH`. It timestamps, appends a record, then
+  `exec`s the real executable.
+
+The wrapper runs inside the per-agent SWE-bench container, so the container
+needs a writable mount for telemetry alongside the read-only mount of the
+binary. Each agent appends to its own file, `telemetry/<run_id>/<agent_id>.jsonl`.
+Per-agent files remove cross-process interleaving entirely and let the dashboard
+accept one or more inputs, which it already does.
 
 ---
 
@@ -953,7 +1014,7 @@ Tasks:
 - generate independent worktrees;
 - launch several agents concurrently;
 - scale to 20 if infrastructure allows;
-- give them the same Unbounded workspace;
+- give them the same MongoDB database name;
 - log all Unbounded operations;
 - collect final diffs.
 
@@ -1050,13 +1111,16 @@ unbounded update
 
 if needed.
 
-If MongoDB is directly available, Unbounded can simply be a tiny wrapper that:
+If MongoDB is directly available, Unbounded can be a small standalone executable
+that:
 
-1. injects the correct workspace namespace;
+1. reads the caller's MongoDB URI and database name;
 2. authenticates;
 3. executes the requested operation;
-4. returns JSON;
-5. logs usage.
+4. returns JSON.
+
+The pilot launcher handles database assignment and usage logging. Unbounded
+does not inject workspace fields or experiment metadata into user documents.
 
 Do not overbuild it before seeing whether agents actually use it.
 
@@ -1066,8 +1130,12 @@ Do not overbuild it before seeing whether agents actually use it.
 
 ```text
 unbounded-pilot/
-├── unbounded/
-│   └── cli.py
+├── src/
+│   └── cli.ts
+├── dist/
+│   └── unbounded
+├── package.json
+├── bun.lock
 ├── runner/
 │   ├── swarm.py
 │   └── worktrees.py

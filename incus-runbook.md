@@ -25,8 +25,14 @@ Verify:
 
 ```bash
 incus remote list          # crabbox-ec2 -> https://10.200.0.2:8443
-aws sts get-caller-identity
+AWS_PROFILE=mkly aws sts get-caller-identity
 ```
+
+AWS access is SSO, not static keys — the only entry in `~/.aws/credentials` is
+`taskwarrior-sync`, which is unrelated. Every `aws` and `scripts/*.sh` call
+below needs `AWS_PROFILE=mkly`; without it you get `NoCredentials`. If the SSO
+token has expired, run `aws sso login --profile mkly` yourself (it opens a
+browser).
 
 ---
 
@@ -51,14 +57,16 @@ public IP is stable (Elastic IP), so nothing needs re-pointing after a restart.
 ## 2. Create the pilot container
 
 ```bash
-incus launch images:ubuntu/24.04/cloud unbounded-pilot \
-  --remote crabbox-ec2 \
+incus launch images:ubuntu/24.04/cloud crabbox-ec2:unbounded-pilot \
   -c limits.cpu=28 \
   -c limits.memory=48GiB \
   -c security.nesting=true
 ```
 
 Notes:
+
+- The remote goes on the **instance name** (`crabbox-ec2:unbounded-pilot`).
+  `incus launch` has no `--remote` flag and fails with `unknown flag: --remote`.
 
 - `security.nesting=true` is needed if you run the SWE-bench evaluator through
   Docker inside the container. Skip it only if you plan to run the tasks' test
@@ -116,6 +124,10 @@ pilotsh '
 '
 ```
 
+`agent` lands on **uid 1001, gid 1002** — not 1001/1001. `useradd` takes the
+next free gid, and gid 1001 is already taken by the image's `ubuntu` group.
+Confirm with `pilot id agent` before using numeric ids anywhere (§4).
+
 ### 3.4 Docker (only if using the SWE-bench evaluator harness)
 
 ```bash
@@ -123,9 +135,65 @@ pilotsh 'curl -fsSL https://get.docker.com | sh && usermod -aG docker agent'
 pilotsh 'docker run --rm hello-world'    # confirms nesting works
 ```
 
-If `hello-world` fails, `security.nesting` did not take effect — restart the
-container (`incus restart crabbox-ec2:unbounded-pilot`) and retry before
-debugging anything else.
+Nested Docker needs two fixes on this host that `security.nesting=true` alone
+does not cover. Both are already applied, but they do not survive a host
+rebuild, and the failure messages point nowhere near the cause.
+
+**1. Kernel keyring quota (host-wide).** Container init joins a session keyring,
+and the kernel default is 200 keys per uid — exhausted well before 20 containers
+on a box that also hosts crabbox leases. It surfaces as:
+
+```text
+unable to join session keyring: unable to create session key: disk quota exceeded
+```
+
+Fixed on the host with `/etc/sysctl.d/90-incus-production.conf` (keyring and
+inotify limits, `vm.max_map_count`); this is also baked into the cloud-init
+template in `~/repos/incus-infra` so a rebuilt host comes up with it.
+
+**2. runc / AppArmor, CVE-2025-52881 fallout (per container).** runc 1.2.8+ and
+1.3.3+ read `/proc/sys` through a detached procfs mount. The AppArmor profile
+Incus generates matches that path against its `deny /sys/[^fdck]*` rule and
+denies it — silently, since `deny` rules do not audit, so `dmesg` shows nothing:
+
+```text
+open sysctl net.ipv4.ip_unprivileged_port_start file: reopen fd 8: permission denied
+```
+
+Docker works with `--network host` and fails whenever a container gets its own
+network namespace, which is the tell. Incus fixed this in **6.19**; this host
+runs Ubuntu's **6.0.0 LTS** with no newer package in the archive, so the fix is
+not available via `apt`. The container-scoped workaround is to run a `runc` from
+before the change:
+
+```bash
+pilotsh '
+  curl -fsSL -o /tmp/runc.amd64 \
+    https://github.com/opencontainers/runc/releases/download/v1.2.7/runc.amd64
+  cp -n /usr/bin/runc /usr/bin/runc.orig
+  install -m 755 /tmp/runc.amd64 /usr/bin/runc
+  apt-mark hold containerd.io
+  systemctl restart docker
+'
+pilotsh 'docker run --rm hello-world'
+```
+
+This gives up a runc hardening fix for the *inner* Docker containers only. That
+is the cheap direction to lose: the Incus container is the real boundary, the
+agents already have a shell inside it, and an inner escape lands where they
+already are. Unconfining AppArmor on the Incus container instead
+(`raw.lxc: lxc.apparmor.profile=unconfined`) would weaken the boundary that
+actually matters, and a `raw.apparmor` allow rule cannot help — AppArmor `deny`
+always beats a later allow.
+
+The clean fix, when there is time for it, is upgrading Incus on the host to
+6.19+ from the zabbly repo and dropping the pinned runc. That is shared infra
+with other crabbox containers on it, so it is not a mid-pilot change.
+
+`security.nesting` not taking effect is a *different* failure — it stops Docker
+much earlier, before any image is pulled. If `hello-world` pulls the image and
+then fails during container init, nesting is working and one of the two above is
+your problem.
 
 ---
 
@@ -137,9 +205,18 @@ truth on your workstation.
 
 ```bash
 cd ~/repos/mongodb-hack
-incus file push -r . crabbox-ec2:unbounded-pilot/work/unbounded-pilot/ \
-  --uid 1001 --gid 1001        # 'agent' uid/gid; check with: pilot id agent
+pilotsh 'mkdir -p /work/unbounded-pilot'
+incus file push -r . crabbox-ec2:unbounded-pilot/work/unbounded-pilot/
+pilotsh 'chown -R agent:agent /work/unbounded-pilot'
 ```
+
+`incus file push -r` rejects ownership flags outright (`Can't supply
+uid/gid/mode in recursive mode`), so ownership is a separate `chown`. The
+single-file pushes below *do* take `--uid/--gid`, and there the numbers are
+**1001:1002** (§3.3).
+
+Note this pushes `.git/` along with everything else. Harmless, but it is the
+bulk of the transfer.
 
 For iteration during the pilot, re-push just the changed files:
 
@@ -159,7 +236,7 @@ the agents. Nothing secret enters the Incus database.
 
 ```bash
 incus file push ~/.config/unbounded/pilot.env \
-  crabbox-ec2:unbounded-pilot/work/.env --mode 0600 --uid 1001 --gid 1001
+  crabbox-ec2:unbounded-pilot/work/.env --mode 0600 --uid 1001 --gid 1002
 ```
 
 `pilot.env`:
@@ -186,8 +263,7 @@ old value in their process environment until relaunched.
 
 ```bash
 incus config set crabbox-ec2:unbounded-pilot \
-  environment.PILOT_ROOT=/work/unbounded-pilot \
-  environment.UNBOUNDED_DB=unbounded
+  environment.PILOT_ROOT=/work/unbounded-pilot
 ```
 
 Note `UNBOUNDED_MONGO_URI` is **not** in that list. The Atlas SRV string embeds
@@ -217,21 +293,25 @@ pass show anthropic/pilot | incus exec crabbox-ec2:unbounded-pilot -- \
   sh -c 'install -m600 -o agent -g agent /dev/stdin /work/.anthropic-key'
 ```
 
-#### d. Per-agent variables belong in the launcher, not the container
+#### d. Run and agent variables belong in the launcher, not the container
 
-`AGENT_ID` and `UNBOUNDED_WORKSPACE` differ per agent, so they must be set on
-each subprocess — this is the one-line difference between the shared and
-isolated conditions:
+The launcher sets `AGENT_ID` for the agent harness and `UNBOUNDED_DB` for the
+standalone Unbounded executable. Every agent gets the same database in the
+shared condition. Each agent gets a separate database in the isolated
+condition:
 
 ```python
 env = {
-    **os.environ,                                    # inherits /work/.env
+    **os.environ,                                  # inherits /work/.env
     "AGENT_ID": str(agent_id),
-    "UNBOUNDED_WORKSPACE": run_id,                    # shared
-    # "UNBOUNDED_WORKSPACE": f"{run_id}-{agent_id}",  # isolated
+    "UNBOUNDED_DB": f"{run_id}_shared",           # shared
+    # "UNBOUNDED_DB": f"{run_id}_agent_{agent_id}", # isolated
 }
 subprocess.Popen(cmd, cwd=worktree, env=env)
 ```
+
+`unbounded` reads `UNBOUNDED_DB`; it does not read `AGENT_ID` or know which
+experimental condition the launcher selected.
 
 Source `/work/.env` once in the tmux launch command (§5, hour 2) and every agent
 inherits the keys from there.
@@ -260,33 +340,96 @@ processes under tmux and don't need this.
 - Don't pass keys as command-line arguments to the agent processes — 20 agents
   means 20 copies of the key visible in `ps` output to anything in the container.
 
-### Python environment
+### Agent environment
 
 ```bash
 pilotsh 'su - agent -c "
   cd /work/unbounded-pilot &&
   python3 -m venv .venv &&
-  .venv/bin/pip install -U pip \"pymongo[srv]\" &&   # [srv] is required for Atlas, see §4.5
-  .venv/bin/pip install mini-swe-agent
+  .venv/bin/pip install -U pip mini-swe-agent
 "'
 ```
 
-Then make `unbounded` available on every agent's `$PATH` — this is the one
-affordance the plan says must be present in the agent shell:
+The venv is for the **harness**, not for Unbounded. `mini-swe-agent` and the
+SWE-bench evaluator are Python, so the agent loop and the scoring step need an
+interpreter. The `unbounded` CLI is TypeScript and shares none of this.
+
+Build the TypeScript CLI on your workstation as one Linux executable:
 
 ```bash
-pilotsh 'cat > /usr/local/bin/unbounded <<EOF
-#!/bin/sh
-exec /work/unbounded-pilot/.venv/bin/python /work/unbounded-pilot/unbounded/cli.py "\$@"
-EOF
-chmod 755 /usr/local/bin/unbounded'
+bun install --frozen-lockfile
+bun build --compile --target=bun-linux-x64 src/cli.ts --outfile dist/unbounded
+```
+
+The Incus host uses x86-64 Linux, so this command works from another supported
+build platform too. The compiled executable includes the Bun runtime and does
+not require Bun or Node.js in the pilot container.
+
+Install `unbounded` on every agent's `$PATH`:
+
+```bash
+pilotsh 'install -m 0755 \
+  /work/unbounded-pilot/dist/unbounded /usr/local/bin/unbounded'
 
 pilotsh 'su - agent -c "unbounded inspect"'
 ```
 
+**Until that binary exists**, the container carries a placeholder at
+`/usr/local/bin/unbounded` and Bun 1.3.14 at `/usr/local/bin/bun` (installed to
+`/usr/local/bun`, symlinked, world-readable). The placeholder prefers
+`$UNBOUNDED_REPO/dist/unbounded` — the same path the `install` above uses — and
+otherwise runs `src/cli.ts`, `src/index.ts`, `cli.ts`, or `index.ts` under Bun.
+So either handoff works: a compiled binary, or a source tree pushed into
+`/work/unbounded-pilot`. With neither present it exits 127 naming what it looked
+for, rather than failing somewhere confusing:
+
+```
+unbounded: no CLI found under /work/unbounded-pilot
+  looked for: dist/unbounded, src/cli.ts, src/index.ts, cli.ts, index.ts
+```
+
+The `install` command above overwrites the placeholder, which is intended — once
+the compiled executable is in place nothing needs Bun at runtime. Drop Bun from
+the container before publishing `unbounded-base` (§7) if you want the image lean.
+
 ---
 
 ## 4.5 Connecting to MongoDB Atlas
+
+### What's already provisioned
+
+Verified with the Atlas CLI:
+
+| | |
+|---|---|
+| Org / Project | `mike@mkly.io's Sandbox Project` — `6a7d5a3beb4a5a3fbf07a293` |
+| Cluster | `Cluster0`, **M10**, MongoDB 8.0.29, AWS `US_WEST_1`, IDLE, 10 GB, backups on |
+| SRV host | `cluster0.kyk94d.mongodb.net` |
+| Access list | `44.231.18.79/32` (crabbox-ec2) and `12.78.75.210/32` — both present |
+| Database user | `unbounded`, `readWrite@unbounded` — created, connection verified |
+
+Re-check any time with:
+
+```bash
+export ATLAS_PROJECT=6a7d5a3beb4a5a3fbf07a293
+atlas clusters list --projectId $ATLAS_PROJECT
+atlas accessLists list --projectId $ATLAS_PROJECT
+atlas dbusers list --projectId $ATLAS_PROJECT
+```
+
+This is an **M10, covered by hackathon credits** — dedicated tier, not free M0.
+So the shared-tier limits usually assumed in this kind of setup don't apply:
+10 GB storage, ~1500 connections, and no restricted-command list. `$currentOp`,
+`collStats`, and `mongodump --oplog` all work.
+
+Cost isn't a constraint on the pilot. The only thing to keep an eye on is that
+hackathon credits are finite and dated — if the cluster is still up weeks later,
+that's when it starts mattering (§8).
+
+The cluster is in **`US_WEST_1`** (N. California) while the Incus host is in
+**us-west-2** (Oregon), so every `unbounded` call pays ~20 ms of cross-region
+latency. Not worth relocating for a 4-hour pilot — agents are model-latency
+bound — but it's the reason per-op timings won't look like loopback.
 
 ### The IP to allowlist: `44.231.18.79/32`
 
@@ -339,20 +482,40 @@ IP access list only. That's fine here; the EIP is stable.
 
 ### Everything else you need
 
-**1. A database user.** Atlas → Database Access → Add New Database User, SCRAM
-password auth, built-in role `readWrite` on the pilot database (not
-`atlasAdmin`). Autogenerate the password and paste it straight into
-`pilot.env` — never into `incus config` (§4b).
+**1. A database user** — already created; recorded here so a rebuild can repeat
+it. Generate the password locally and paste it straight into `pilot.env`; never
+into `incus config` (§4b).
 
-**2. The SRV connection string**, from Atlas → Connect → Drivers:
+There is **no `--autoGeneratePassword` flag** in atlascli 1.58 — it fails with
+`unknown flag`. Generate the password yourself and pass it with `-p`. Keep it
+alphanumeric so the URI needs no percent-encoding:
 
 ```bash
-UNBOUNDED_MONGO_URI='mongodb+srv://unbounded:<password>@<cluster>.xxxxx.mongodb.net/?retryWrites=true&w=majority&appName=unbounded-pilot'
+UNBOUNDED_PW="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)"
+
+atlas dbusers create readWriteAnyDatabase \
+  --projectId 6a7d5a3beb4a5a3fbf07a293 \
+  --username unbounded -p "$UNBOUNDED_PW"
 ```
 
-Add it to `/work/.env` alongside the API keys (§4a). This is the single place
-the cluster is named — `unbounded/cli.py` should read `UNBOUNDED_MONGO_URI` and
-nothing else, so pointing the swarm at a different cluster is a one-line change.
+The pilot uses a database per shared or isolated namespace, so this account
+needs access to those databases. `readWriteAnyDatabase` avoids the broader
+administrative privileges in `atlasAdmin`. This setup provides logical
+isolation: an agent could change `UNBOUNDED_DB` from its shell. Use one
+database-scoped credential per agent if the control requires enforced
+isolation.
+
+**2. The SRV connection string** (cluster host confirmed via
+`atlas clusters connectionStrings describe Cluster0`):
+
+```bash
+UNBOUNDED_MONGO_URI='mongodb+srv://unbounded:<password>@cluster0.kyk94d.mongodb.net/?retryWrites=true&w=majority&appName=unbounded-pilot'
+```
+
+Add it to `/work/.env` alongside the API keys (§4a). The `unbounded`
+executable reads `UNBOUNDED_MONGO_URI` and `UNBOUNDED_DB`. The launcher sets
+the database name for each process, so it can switch between shared and
+isolated runs without changing the executable.
 
 URL-encode the password if it contains `@ : / ? # [ ] %`. An unencoded `@` in a
 password produces a parse error that reads like a DNS failure and wastes ten
@@ -381,26 +544,26 @@ Smoke-test the whole path before hour 1:
 pilotsh 'su - agent -c "set -a; . /work/.env; set +a; mongosh \"\$UNBOUNDED_MONGO_URI\" --quiet --eval \"db.runCommand({ping:1})\""'
 ```
 
-### Free-tier limits that bite a 20-agent swarm
+### Capacity notes for a 20-agent swarm
 
-M0 is shared infrastructure, and 20 concurrent agents is a heavier client than
-it's sized for. Three constraints worth designing around up front:
+M10 is dedicated infrastructure, so the free-tier restrictions that usually
+shape this design don't apply. What still matters:
 
-- **512 MB storage.** Per-model-call and per-unbounded-op telemetry (the plan's
-  §Telemetry) can fill that inside one run. Write telemetry to JSONL on the
-  container's ZFS-backed disk (`/work/logs/`) and keep Atlas for the
-  agent-visible shared memory only. That is also cleaner experimentally — the
-  telemetry observer is supposed to be external to the swarm — and it keeps the
-  512 MB budget spent on the thing the experiment actually measures.
-- **500 connections, and shared-tier rate limiting.** If `unbounded` is a CLI
-  that opens a fresh `MongoClient` per invocation, 20 agents in a tight loop
-  will churn connections hard. Either keep the CLI's client short-lived and
-  explicitly closed, or front it with a small local daemon holding one pooled
-  client. Watch for `connection pool paused` and server-side throttling.
-- **Restricted commands.** Shared tiers block some admin/diagnostic operations.
-  Build `unbounded inspect` on ordinary `aggregate` with `$sample`, `db.stats()`,
-  and `listIndexes` — all available — rather than `$currentOp` or `collStats`.
-  `mongodump` works; `mongodump --oplog` does not.
+- **Connection churn.** ~1500 connections is plenty, but if `unbounded` is a CLI
+  that opens a fresh `MongoClient` per invocation, 20 agents in a tight loop pay
+  full TLS-handshake plus SRV-lookup cost on *every* memory operation, across
+  regions. That's latency, not a limit — but it's the difference between a
+  memory call feeling free and feeling expensive to the agents. Reuse a client
+  where you can, and watch for `connection pool paused`.
+- **10 GB storage.** Ample for the agent-visible memory. Still send the plan's
+  per-model-call and per-op telemetry to JSONL in `/work/logs/` rather than
+  Atlas — not for space reasons now, but because the telemetry observer is
+  supposed to be external to the swarm, and mixing it into the same cluster the
+  agents read makes the corpus harder to analyze cleanly.
+- **No command restrictions.** `unbounded inspect` can use `collStats` and
+  `$currentOp`, and `mongodump --oplog` works if you want write ordering — which
+  is genuinely useful here, since "which agent wrote what, when" is one of the
+  things the pilot is trying to observe.
 
 Because every `unbounded` call is now a network round trip to Atlas rather than a
 loopback call, per-operation latency is tens of milliseconds instead of under
@@ -408,9 +571,9 @@ one. That is fine for the pilot — agents are model-latency bound — but it do
 mean **all three conditions must run against the same cluster** so wall-clock
 stays comparable. Don't switch backends between conditions.
 
-If M0 throttling starts distorting the run, the fix is a paid tier (M10 is
-roughly $0.08/hr, trivial next to the $1.64/hr host), not a different backend.
-Record the tier in the run metadata either way.
+Record the tier (`M10`) and region (`US_WEST_1`) in the run metadata so the
+timings stay interpretable if a later experiment runs against different
+infrastructure.
 
 ---
 
@@ -469,7 +632,7 @@ parallel — 20 simultaneous pytest runs will saturate the box.
 
 ### Hour 3 — isolated control + frontier baseline
 
-Same command, different workspace namespacing (the plan's one-line difference):
+Use the same command with a different database assignment:
 
 ```bash
 ... runner/swarm.py --run-id run-002 --condition isolated --agents 20
@@ -558,8 +721,27 @@ incus publish crabbox-ec2:unbounded-pilot/provisioned \
 incus start crabbox-ec2:unbounded-pilot
 ```
 
-Publish from the `provisioned` snapshot, not the live container — that snapshot
-predates `/work/.env`, so the image carries no API keys.
+> **The existing `provisioned` snapshot contains `/work/.env`.** It was taken
+> after Atlas connectivity was verified, so it holds the live `unbounded` Atlas
+> password. Do **not** publish an image from it. Either rotate the Atlas password
+> after publishing, or take a clean snapshot first:
+>
+> ```bash
+> pilotsh 'mv /work/.env /root/.env.hold'
+> incus snapshot create crabbox-ec2:unbounded-pilot clean-base
+> pilotsh 'mv /root/.env.hold /work/.env'
+> incus publish crabbox-ec2:unbounded-pilot/clean-base \
+>   crabbox-ec2: --alias unbounded-base
+> ```
+
+Publish from a snapshot that predates `/work/.env`, never from the live
+container. Snapshots and published images copy the filesystem verbatim — file
+mode `0600` protects the file on a running system, not inside an image someone
+else can import. Verify before sharing an image:
+
+```bash
+incus file pull crabbox-ec2:unbounded-pilot/work/.env - 2>&1 | head -1
+```
 
 ---
 
@@ -583,6 +765,26 @@ Delete the container only if you no longer want the environment:
 incus delete --force crabbox-ec2:unbounded-pilot
 ```
 
+### The Atlas cluster
+
+Nothing to do here at the end of a session. `Cluster0` is an M10 running on
+hackathon credits, so leaving it up costs you nothing, and the EC2 teardown
+above doesn't affect it either way.
+
+Optional, if you want to stop drawing down credits between sessions:
+
+```bash
+atlas clusters pause Cluster0 --projectId 6a7d5a3beb4a5a3fbf07a293
+atlas clusters start Cluster0 --projectId 6a7d5a3beb4a5a3fbf07a293   # to resume
+```
+
+A paused cluster keeps its data, users, and access list, and Atlas auto-resumes
+it after 30 days.
+
+Do keep the local dump (§5) regardless. The corpus is the experimental result,
+`terminationProtectionEnabled` is `false`, and credit-based clusters outlive the
+hackathon only as long as the credits do.
+
 ---
 
 ## Troubleshooting
@@ -592,21 +794,93 @@ incus delete --force crabbox-ec2:unbounded-pilot
 | `incus list crabbox-ec2:` hangs | Tunnel down. `sudo systemctl restart wg-quick@wg0`, check `sudo wg show` for a handshake. |
 | Tunnel up but Incus API refuses | Instance still booting. `ssh ubuntu@10.200.0.2 cloud-init status --wait`. |
 | Swarm dies when your laptop sleeps | Not launched under `tmux`. Always launch runs detached (§5, hour 2). |
-| `docker run` fails in the container | `security.nesting=true` missing or not applied — set it and restart the container. |
-| Agents can't find `unbounded` | The wrapper is in `/usr/local/bin`; confirm with `pilot su - agent -c 'command -v unbounded'`. |
+| `docker run`: `unable to join session keyring: disk quota exceeded` | Host kernel keyring quota, not nesting. Raise `kernel.keys.maxkeys`/`maxbytes` on the **host** (§3.4). |
+| `docker run`: `reopen fd N: permission denied` on a sysctl | runc ≥1.3 detached-procfs mounts vs. Incus's AppArmor profile (CVE-2025-52881 hardening). Pin runc 1.2.7 (§3.4). Not a nesting problem — don't set `raw.apparmor`. |
+| `docker run` fails some other way | Then suspect `security.nesting=true` — check `incus config get crabbox-ec2:unbounded-pilot security.nesting`. |
+| Agents can't find `unbounded` | It's in `/usr/local/bin`; confirm with `pilotsh 'su - agent -c "command -v unbounded"'`. |
+| `unbounded: no CLI found under /work/unbounded-pilot` | Placeholder is live but the real CLI hasn't landed. Install `dist/unbounded` or push the TS source (§4a). |
 | Atlas connection times out from the container | EIP not on the Atlas access list. Verify egress: `pilotsh 'curl -s https://api.ipify.org'` → expect `44.231.18.79` (§4.5). |
 | Atlas works in the container, fails from your laptop | Workstation IP changed. Re-add via Atlas "Add Current IP Address". |
 | `The "dnspython" module must be installed` | `mongodb+srv://` needs it: `pip install "pymongo[srv]"` (§4.5). |
 | Auth fails with a URI that looks correct | Unencoded `@`/`:`/`/` in the password. URL-encode it. |
-| `connection pool paused` mid-run | M0 connection churn from 20 agents — pool the client or move up a tier (§4.5). |
+| `connection pool paused` mid-run | Connection churn from 20 agents. The M10 allows ~1500 connections, so this means clients aren't being reused — pool the client per agent process, don't reconnect per CLI call (§4.5). |
 | Host feels wedged mid-run | 20 parallel test suites. Lower agent concurrency or raise `limits.cpu`. |
+
+## Decisions made
+
+- **Provider: Anthropic only.** `/work/.env` carries `ANTHROPIC_API_KEY`;
+  `OPENAI_API_KEY` is commented out.
+- **Models** (litellm strings, as passed to `mini-swe-agent`):
+
+  | Arm | Role | Model |
+  |---|---|---|
+  | A — shared memory | small model ×20 | `anthropic/claude-haiku-4-5-20251001` |
+  | B — isolated control | small model ×20 | `anthropic/claude-haiku-4-5-20251001` |
+  | C — baseline | single agent | `anthropic/claude-sonnet-5` |
+
+  A and B **must** use the identical model — B is the control that isolates
+  whether shared memory beats 20 independent samples, so a model difference
+  would confound the only comparison that matters.
+
+  Arm C is Sonnet 5, not Opus 5. That is a mid-tier baseline, so a swarm win is
+  a weaker claim than beating a top-tier model — name the model in any writeup
+  rather than saying "frontier". Arm C is one agent, so adding an Opus 5 run
+  later is cheap.
+
+- **Evaluation: the official Docker-based SWE-bench harness** (§3.4 required).
+  `swebench` 4.1.0 in the venv; `agent` is in the `docker` group — it is not by
+  default, and root having Docker access does not imply the swarm does.
+
+  **Verified end to end.** A gold-patch run scores 1/1 with no errors:
+
+  ```bash
+  pilotsh 'su - agent -c "
+    cd /work/unbounded-pilot &&
+    .venv/bin/python -m swebench.harness.run_evaluation \
+      --dataset_name princeton-nlp/SWE-bench_Lite \
+      --predictions_path gold --max_workers 1 \
+      --instance_ids django__django-11099 --run_id smoke
+  "'
+  ```
+
+  `--predictions_path gold` feeds the dataset's own correct patch through the
+  real harness, so it tests the infrastructure without involving a model. Expect
+  `"resolved_instances": 1, "error_instances": 0` in `gold.smoke.json`. Re-run
+  this after any change to runc, Docker, or the container profile.
+
+  **Use `--cache_level instance` for the pilot.** The default removes the
+  instance image when the run finishes (`Unremoved images: 0`), so every
+  evaluation rebuilds it. That is fine for a one-off smoke test and wasteful
+  across 20 agents evaluating repeatedly. Watch disk on the ZFS pool if you do —
+  SWE-bench instance images are on the order of a gigabyte each.
+
+- **Task instances: three**, chosen for short evaluator runtime with a real
+  patch to find. All three verified `resolved 3/3, errors 0` on gold, and their
+  images are cached locally:
+
+  | Instance | Tests per eval | Patch | Image |
+  |---|---|---|---|
+  | `pylint-dev__pylint-7228` | 12 | 13 lines | 2.60 GB |
+  | `pallets__flask-4992` | 19 | 11 lines | 2.68 GB |
+  | `pytest-dev__pytest-8365` | 33 | 7 lines | 2.31 GB |
+
+  SWE-bench runs only `FAIL_TO_PASS` + `PASS_TO_PASS`, not the repo's full
+  suite, so **that test count — not the repo's reputation — is the cost driver**.
+  For contrast, `psf__requests-2674` runs 154 tests and `pydata__xarray-4493`
+  runs 1690. Check `PASS_TO_PASS` length before substituting an instance.
+
+  Each arm runs all 20 agents against the *same* instance — shared memory has
+  nothing to share otherwise — so an instance is a full 20-agent run, not 1/20th
+  of the work.
 
 ## Open items to resolve before hour 1
 
-These depend on choices the plan deliberately leaves open:
-
-- Which SWE-bench Lite instances (and therefore which repos and base commits) —
-  `<base-commit>` and the clone URL in §5 are placeholders.
-- Which small model and provider, which decides what goes in `/work/.env`.
-- Whether evaluation uses the official Docker-based SWE-bench harness (needs
-  §3.4) or direct test runs in the task venv (skip §3.4, save ~10 minutes).
+- Anthropic **rate limits** at 20-way concurrency. This account returns no
+  `ratelimit-*` response headers, so the ceiling can't be read ahead of time.
+  `mini-swe-agent`'s failure mode on a 429 storm is a stalled agent, not a loud
+  error — so the launcher needs retry-with-backoff, and concurrency should ramp
+  rather than open all 20 at once.
+- Whether `runner/swarm.py` stays Python or moves to TypeScript alongside the
+  CLI. It drives a Python harness, so Python is the path of least resistance.
+- The telemetry schema (plan lines 636–642). Must be wired in before the first
+  run or arm C's cost comparison can't be reconstructed afterward.
