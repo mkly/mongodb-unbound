@@ -144,3 +144,25 @@ The executable is intentionally only a neutral MongoDB client. It does not
 contain workspace injection, agent identity, swarm coordination, benchmark
 behavior, experiment telemetry, or hidden writes beyond the command explicitly
 requested by the caller.
+
+## Observatory activity model
+
+`src/activity.ts` provides the read-only input layer used by the schema
+observatory. `createActivityStream` combines bounded collection snapshots, a
+MongoDB change stream, and any number of per-agent JSONL files into a stream of
+normalized records. Sources are optional, and the MongoDB and file adapters are
+injectable so callers can test or replace the I/O boundary.
+
+An activity record has `kind: "activity"`, a stable `id`, an ISO `timestamp`,
+`provenance` (`mongodb`, `telemetry`, or `correlated`), and an `operation`.
+Collection, document ID/content, fingerprint, success, telemetry type, and the
+run/task/agent/condition attribution are present only when the source supplies
+them. Correlated writes use MongoDB's document content and timestamp together
+with JSONL attribution. Unmatched MongoDB changes remain valid unattributed
+activity.
+
+Malformed JSONL, incomplete records, unknown telemetry types, and change-stream
+disconnects produce `kind: "diagnostic"` records instead of terminating the
+stream. JSONL is deduplicated by `event_id`; MongoDB changes are deduplicated by
+resume token and reconnect from the last token. A partial trailing JSONL line is
+held until a following append completes it.
