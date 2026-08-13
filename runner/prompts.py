@@ -46,18 +46,19 @@ It is already configured from the environment; never pass --uri or --db.
 Documents and filters are MongoDB Extended JSON. Each command prints one line of
 JSON: on success {"ok":true,"data":...}, on failure {"ok":false,"error":...}.
 
-  unbounded insert <collection> <document>     insert one document
-  unbounded find <collection> <filter>         find documents; filter required, '{}' matches all
-  unbounded get <collection> <id>              get one document by _id
-  unbounded update <collection> <id> <document>  update one document by _id
-  unbounded delete <collection> <id>           delete one document by _id
-  unbounded sample <collection>                bounded random sample of documents
-  unbounded inspect <collection>               observed fields, BSON types, and document shapes
+Every document goes in one place; there is nothing to name or create first.
+
+  unbounded insert <document>          insert one document
+  unbounded find <filter>              find documents; filter required, '{}' matches all
+  unbounded get <id>                   get one document by _id
+  unbounded update <id> <document>     update one document by _id
+  unbounded delete <id>                delete one document by _id
+  unbounded sample                     bounded random sample of documents
+  unbounded inspect                    observed fields, BSON types, and document shapes
 
 Whatever is already stored may have been written by other engineers working in
-parallel, and whatever you write remains after you finish. No collection names,
-schema, or format are prescribed; `inspect` and `sample` are how you find out
-what is there."""
+parallel, and whatever you write remains after you finish. No schema or format
+is prescribed; `inspect` and `sample` are how you find out what is there."""
 
 
 #: Task-level reminder, appended to `agent.instance_template`. Appended VERBATIM
@@ -71,14 +72,14 @@ what is there."""
 #: agents never use memory, the shared and isolated arms are identical by
 #: construction and the pilot measures nothing.
 #:
-#: It instructs WHEN to reach for memory, never WHAT to store. Collection names
-#: and schema are what the experiment measures, so prescribing them would destroy
+#: It instructs WHEN to reach for memory, never WHAT to store. Document shape and
+#: wording are what the experiment measures, so prescribing them would destroy
 #: the result.
 TASK_MEMORY_PROMPT: Final[str] = """\
 
 Before you begin, check `unbounded` for anything relevant to this task; other
 engineers may already have recorded something useful. Before you submit, record
-what you learned. Choose the collections, structure, and wording yourself."""
+what you learned. Choose the structure and wording yourself."""
 
 
 def build_instance_prompt(condition: str, base_template: str) -> str:

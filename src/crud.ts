@@ -5,7 +5,14 @@ import { parseEjson, parseId } from "./ejson.ts";
 import { CliError } from "./errors.ts";
 import { fingerprintDocument } from "./schema-fingerprint.ts";
 
-export const DEFAULT_COLLECTION = "default";
+// Every document lives here. The store deliberately exposes no way to name a
+// collection: agents given the choice each invented their own name for the same
+// concept (`tmpdir_issue`, `pytest_tmpdir_issue`, `tmpdir_fix`), so the shared
+// arm ended up with a scatter of one-document collections that no other agent's
+// `find` would ever reach. Convergence is still measured -- on document *shape*,
+// via `hashFingerprint()` -- but the retrieval path no longer depends on two
+// agents independently guessing the same string.
+export const MEMORY_COLLECTION = "memory";
 export const DEFAULT_FIND_LIMIT = 100;
 export const MAX_FIND_LIMIT = 1_000;
 
@@ -53,22 +60,16 @@ function updatedFields(update: Document): Document | undefined {
     : undefined;
 }
 
-function parseCollectionAndValues(
+function parseValues(
   args: readonly string[],
   valueCount: number,
   usage: string,
-): { collection: string; values: readonly string[] } {
-  if (args.length === valueCount) {
-    return { collection: DEFAULT_COLLECTION, values: args };
-  }
-  if (args.length === valueCount + 1 && args[0].length > 0) {
-    return { collection: args[0], values: args.slice(1) };
-  }
-  return invalidArguments(`Usage: ${usage}`);
+): readonly string[] {
+  if (args.length !== valueCount) invalidArguments(`Usage: ${usage}`);
+  return args;
 }
 
 function parseFindArguments(args: readonly string[]): {
-  collection: string;
   filter: Document;
   limit: number;
 } {
@@ -105,35 +106,27 @@ function parseFindArguments(args: readonly string[]): {
     sawLimit = true;
   }
 
-  const parsed = parseCollectionAndValues(
+  const values = parseValues(
     positional,
     1,
-    "unbounded find [collection] <filter> [--limit N]",
+    "unbounded find <filter> [--limit N]",
   );
-  return {
-    collection: parsed.collection,
-    filter: parseDocument(parsed.values[0], "filter"),
-    limit,
-  };
+  return { filter: parseDocument(values[0], "filter"), limit };
 }
 
 export const insertCommand: CommandHandler = {
   name: "insert",
   summary: "Insert one Extended JSON document",
-  usage: "insert [collection] <document>",
+  usage: "insert <document>",
   async run(context, args) {
-    const parsed = parseCollectionAndValues(
-      args,
-      1,
-      "unbounded insert [collection] <document>",
-    );
-    const document = parseDocument(parsed.values[0], "document");
+    const values = parseValues(args, 1, "unbounded insert <document>");
+    const document = parseDocument(values[0], "document");
     const result = await context.db
-      .collection(parsed.collection)
+      .collection(MEMORY_COLLECTION)
       .insertOne(document);
     return {
       acknowledged: result.acknowledged,
-      collection: parsed.collection,
+      collection: MEMORY_COLLECTION,
       insertedId: result.insertedId,
       // Reported so the telemetry wrapper can read the shape off our output
       // instead of re-deriving it from argv with a second implementation.
@@ -147,11 +140,11 @@ export const insertCommand: CommandHandler = {
 export const findCommand: CommandHandler = {
   name: "find",
   summary: "Find documents matching an Extended JSON filter",
-  usage: "find [collection] <filter> [--limit N]",
+  usage: "find <filter> [--limit N]",
   async run(context, args) {
     const parsed = parseFindArguments(args);
     return await context.db
-      .collection(parsed.collection)
+      .collection(MEMORY_COLLECTION)
       .find(parsed.filter, { promoteValues: false })
       .limit(parsed.limit)
       .toArray();
@@ -161,16 +154,12 @@ export const findCommand: CommandHandler = {
 export const getCommand: CommandHandler = {
   name: "get",
   summary: "Get one document by _id",
-  usage: "get [collection] <id>",
+  usage: "get <id>",
   async run(context, args) {
-    const parsed = parseCollectionAndValues(
-      args,
-      1,
-      "unbounded get [collection] <id>",
-    );
-    const id = parseId(parsed.values[0]);
+    const values = parseValues(args, 1, "unbounded get <id>");
+    const id = parseId(values[0]);
     return await context.db
-      .collection(parsed.collection)
+      .collection(MEMORY_COLLECTION)
       .findOne({ _id: id } as Filter<Document>, { promoteValues: false });
   },
 };
@@ -178,17 +167,13 @@ export const getCommand: CommandHandler = {
 export const updateCommand: CommandHandler = {
   name: "update",
   summary: "Update one document by _id",
-  usage: "update [collection] <id> <update>",
+  usage: "update <id> <update>",
   async run(context, args) {
-    const parsed = parseCollectionAndValues(
-      args,
-      2,
-      "unbounded update [collection] <id> <update>",
-    );
-    const id = parseId(parsed.values[0]);
-    const update = parseDocument(parsed.values[1], "update");
+    const values = parseValues(args, 2, "unbounded update <id> <update>");
+    const id = parseId(values[0]);
+    const update = parseDocument(values[1], "update");
     const result = await context.db
-      .collection(parsed.collection)
+      .collection(MEMORY_COLLECTION)
       .updateOne(
         { _id: id } as Filter<Document>,
         toUpdateFilter(update) as UpdateFilter<Document>,
@@ -196,7 +181,7 @@ export const updateCommand: CommandHandler = {
     const fields = updatedFields(update);
     return {
       acknowledged: result.acknowledged,
-      collection: parsed.collection,
+      collection: MEMORY_COLLECTION,
       ...(fields === undefined
         ? {}
         : { schemaFingerprint: fingerprintDocument(fields).hash }),
@@ -211,20 +196,16 @@ export const updateCommand: CommandHandler = {
 export const deleteCommand: CommandHandler = {
   name: "delete",
   summary: "Delete one document by _id",
-  usage: "delete [collection] <id>",
+  usage: "delete <id>",
   async run(context, args) {
-    const parsed = parseCollectionAndValues(
-      args,
-      1,
-      "unbounded delete [collection] <id>",
-    );
-    const id = parseId(parsed.values[0]);
+    const values = parseValues(args, 1, "unbounded delete <id>");
+    const id = parseId(values[0]);
     const result = await context.db
-      .collection(parsed.collection)
+      .collection(MEMORY_COLLECTION)
       .deleteOne({ _id: id } as Filter<Document>);
     return {
       acknowledged: result.acknowledged,
-      collection: parsed.collection,
+      collection: MEMORY_COLLECTION,
       deletedCount: result.deletedCount,
     };
   },

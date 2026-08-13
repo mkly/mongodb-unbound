@@ -40,6 +40,23 @@ export interface ObservatoryFieldAgent {
   task_id: string;
 }
 
+/**
+ * One (operation, agent) cell of the operation mix -- how an agent actually
+ * used the store, not what it stored. `kind` splits reads from writes so the
+ * page can show the read/write balance without hard-coding the verb list.
+ */
+export interface ObservatoryOperation {
+  agents: string[];
+  collection: string;
+  condition: string;
+  count: number;
+  failures: number;
+  kind: "other" | "read" | "write";
+  operation: string;
+  run_id: string;
+  task_id: string;
+}
+
 export interface ObservatoryTrend {
   collection: string;
   condition: string;
@@ -61,6 +78,7 @@ export interface ObservatoryFixture {
   field_agent: ObservatoryFieldAgent[];
   fingerprints: ObservatoryFingerprint[];
   generated_at: string;
+  operations: ObservatoryOperation[];
   trends: ObservatoryTrend[];
 }
 
@@ -96,6 +114,41 @@ export const observatoryFixture: ObservatoryFixture = {
       run_id: "shared-01",
       task_id: "task-01",
       timestamp: "2026-08-13T19:57:00.000Z",
+    },
+  ],
+  operations: [
+    {
+      agents: ["agent-ada"],
+      collection: "projects",
+      condition: "shared",
+      count: 12,
+      failures: 0,
+      kind: "write",
+      operation: "insert",
+      run_id: "shared-01",
+      task_id: "task-01",
+    },
+    {
+      agents: ["agent-ada"],
+      collection: "projects",
+      condition: "shared",
+      count: 9,
+      failures: 1,
+      kind: "read",
+      operation: "find",
+      run_id: "shared-01",
+      task_id: "task-01",
+    },
+    {
+      agents: ["agent-babbage"],
+      collection: "projects",
+      condition: "shared",
+      count: 4,
+      failures: 0,
+      kind: "read",
+      operation: "sample",
+      run_id: "shared-01",
+      task_id: "task-01",
     },
   ],
   fingerprints: [
@@ -267,6 +320,11 @@ export function renderSchemaObservatory(
     .stream { max-height:390px; overflow:auto; } .event { display:grid; grid-template-columns:150px 90px 1fr; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); }
     .badge { display:inline-block; padding:2px 7px; border:1px solid currentColor; border-radius:999px; font-size:12px; }
     .insert { color:var(--cyan); } .update { color:var(--accent); } .replace { color:var(--blue); } .delete { color:var(--pink); }
+    .read { color:var(--blue); } .write { color:var(--cyan); } .other { color:var(--muted); }
+    .mix { display:flex; height:22px; margin-top:14px; border:1px solid var(--line); border-radius:999px; overflow:hidden; }
+    .mix span { display:grid; place-content:center; font-size:11px; color:#0d1016; white-space:nowrap; overflow:hidden; }
+    .mix .write { background:var(--cyan); } .mix .read { background:var(--blue); } .mix .other { background:var(--line); color:var(--ink); }
+    .bar { display:block; height:8px; min-width:2px; border-radius:999px; background:currentColor; }
     .clusters { display:flex; gap:14px; flex-wrap:wrap; align-items:center; min-height:250px; }
     .cluster { display:grid; place-content:center; text-align:center; aspect-ratio:1; width:var(--size); max-width:210px; border:2px solid var(--agent-color); border-radius:50%; background:color-mix(in srgb,var(--agent-color) 13%,transparent); }
     .cluster strong { font-size:20px; } .cluster small { color:var(--muted); }
@@ -293,6 +351,7 @@ export function renderSchemaObservatory(
   <main>
     <nav aria-label="Observatory views" role="tablist">
       <button id="tab-activity" role="tab" aria-controls="panel-activity" aria-selected="true">Activity</button>
+      <button id="tab-operations" role="tab" aria-controls="panel-operations" aria-selected="false" tabindex="-1">Operations</button>
       <button id="tab-adoption" role="tab" aria-controls="panel-adoption" aria-selected="false" tabindex="-1">Adoption</button>
       <button id="tab-fields" role="tab" aria-controls="panel-fields" aria-selected="false" tabindex="-1">Field × agent</button>
       <button id="tab-trends" role="tab" aria-controls="panel-trends" aria-selected="false" tabindex="-1">Trends</button>
@@ -300,6 +359,10 @@ export function renderSchemaObservatory(
     <section id="panel-activity" role="tabpanel" aria-labelledby="tab-activity">
       <h2>Live schema activity</h2><p class="muted">Newest structural observations first.</p>
       <div class="grid"><div class="card stream" id="activity"></div><div class="card"><h2>Fingerprint clusters</h2><div class="clusters" id="clusters"></div></div></div>
+    </section>
+    <section id="panel-operations" role="tabpanel" aria-labelledby="tab-operations" hidden>
+      <h2>Operation mix</h2><p class="muted">How the store was used — reads against writes, per verb and per agent.</p>
+      <div id="operations"></div>
     </section>
     <section id="panel-adoption" role="tabpanel" aria-labelledby="tab-adoption" hidden><h2>Schema-adoption timeline</h2><div id="adoption"></div></section>
     <section id="panel-fields" role="tabpanel" aria-labelledby="tab-fields" hidden><h2>Field-by-agent frequencies</h2><div id="field-agent"></div></section>
@@ -333,8 +396,8 @@ export function renderSchemaObservatory(
       }
       function syncFilters() {
         agentKeys = [...new Set(data.fingerprints.map((row) => agentKey(row.agents)))].filter(Boolean).sort();
-        const allRows = [...data.activity, ...data.fingerprints, ...data.adoption, ...data.field_agent, ...data.trends];
-        syncOptions(collectionFilter, [...new Set([...data.activity, ...data.fingerprints].map((row) => row.collection).filter(Boolean))].sort());
+        const allRows = [...data.activity, ...data.fingerprints, ...(data.operations || []), ...data.adoption, ...data.field_agent, ...data.trends];
+        syncOptions(collectionFilter, [...new Set([...data.activity, ...data.fingerprints, ...(data.operations || [])].map((row) => row.collection).filter(Boolean))].sort());
         syncOptions(runFilter, [...new Set(allRows.map((row) => row.run_id).filter(Boolean))].sort());
         syncOptions(taskFilter, [...new Set(allRows.map((row) => row.task_id).filter(Boolean))].sort());
         syncOptions(agentFilter, [...new Set(allRows.flatMap(rowAgents).filter(Boolean))].sort());
@@ -350,6 +413,38 @@ export function renderSchemaObservatory(
         const rows = filtered(data.fingerprints).slice().sort((a, b) => b.count - a.count || a.fingerprint.localeCompare(b.fingerprint));
         const maximum = Math.max(1, ...rows.map((row) => row.count));
         document.getElementById("clusters").innerHTML = rows.length ? rows.map((row) => '<article class="cluster" tabindex="0" style="--size:' + (96 + Math.round(100 * Math.sqrt(row.count / maximum))) + 'px;--agent-color:' + agentColor(row.agents) + '" aria-label="' + escapeHtml(row.fingerprint + ", " + row.count + " observations, " + agentLabel(row.agents)) + '"><strong>' + escapeHtml(row.count) + '</strong><span>' + escapeHtml(row.fingerprint) + '</span><small>' + escapeHtml(agentLabel(row.agents)) + '</small></article>').join("") : '<p class="empty">No fingerprints for these filters.</p>';
+      }
+
+      function renderOperations() {
+        const rows = filtered(data.operations || []);
+        const target = document.getElementById("operations");
+        if (!rows.length) { target.innerHTML = '<p class="empty">No operations for these filters.</p>'; return; }
+        const total = rows.reduce((sum, row) => sum + row.count, 0);
+        const byKind = (kind) => rows.filter((row) => row.kind === kind).reduce((sum, row) => sum + row.count, 0);
+        const reads = byKind("read"), writes = byKind("write"), other = total - reads - writes;
+        const failures = rows.reduce((sum, row) => sum + row.failures, 0);
+        const metric = (label, value) => '<div class="metric"><span class="muted">' + label + '</span><strong>' + unknown(value, "insufficient data") + '</strong></div>';
+        const ratio = writes === 0 ? null : (reads / writes).toFixed(2) + " : 1";
+        const segment = (kind, count) => count === 0 ? "" : '<span class="' + kind + '" style="flex:' + count + '" title="' + count + ' ' + kind + '">' + (count / total > 0.08 ? kind + " " + count : "") + '</span>';
+        // Collapse the (operation, agent) cells into one row per verb for the
+        // headline table; the per-agent split stays available through the agent
+        // filter, which is the same control every other panel uses.
+        const perVerb = new Map();
+        for (const row of rows) {
+          const current = perVerb.get(row.operation) || { agents: [], collections: [], count: 0, failures: 0, kind: row.kind, operation: row.operation };
+          current.count += row.count;
+          current.failures += row.failures;
+          current.agents = [...new Set([...current.agents, ...rowAgents(row)])].sort();
+          current.collections = [...new Set([...current.collections, row.collection])].sort();
+          perVerb.set(row.operation, current);
+        }
+        const verbs = [...perVerb.values()].sort((a, b) => b.count - a.count || a.operation.localeCompare(b.operation));
+        const maximum = Math.max(1, ...verbs.map((row) => row.count));
+        target.innerHTML = '<div class="trend-grid">' + metric("Operations", total) + metric("Read : write", ratio) + metric("Failed", failures) + '</div>'
+          + '<div class="mix" role="img" aria-label="' + writes + ' writes, ' + reads + ' reads, ' + other + ' other">' + segment("write", writes) + segment("read", reads) + segment("other", other) + '</div>'
+          + '<table><thead><tr><th>Operation</th><th>Kind</th><th>Count</th><th>Failed</th><th>Collections</th><th>Agents</th></tr></thead><tbody>'
+          + verbs.map((row) => '<tr><td><span class="badge ' + escapeHtml(row.kind) + '">' + escapeHtml(row.operation) + '</span></td><td class="muted">' + escapeHtml(row.kind) + '</td><td class="' + escapeHtml(row.kind) + '"><span class="bar" style="width:' + Math.round(100 * row.count / maximum) + '%"></span>' + escapeHtml(row.count) + '</td><td>' + (row.failures ? '<span class="delete">' + escapeHtml(row.failures) + '</span>' : '<span class="muted">0</span>') + '</td><td>' + escapeHtml(row.collections.join(", ")) + '</td><td>' + escapeHtml(agentLabel(row.agents)) + '</td></tr>').join("")
+          + '</tbody></table>';
       }
 
       function renderAdoption() {
@@ -373,7 +468,7 @@ export function renderSchemaObservatory(
         document.getElementById("trends").innerHTML = '<div class="trend-grid">' + metric("Effective schemas", latest.effective_schemas) + metric("Inter-agent divergence", latest.inter_agent_divergence) + metric("Temporal stability", latest.temporal_stability) + '</div><table><thead><tr><th>Window</th><th>Collection</th><th>Effective schemas</th><th>Inter-agent divergence</th><th>Temporal stability</th></tr></thead><tbody>' + rows.map((row) => '<tr><td>' + escapeHtml(new Date(row.timestamp).toLocaleString()) + '</td><td>' + escapeHtml(row.collection) + '</td><td>' + unknown(row.effective_schemas, "insufficient") + '</td><td>' + unknown(row.inter_agent_divergence, "insufficient") + '</td><td>' + unknown(row.temporal_stability, "insufficient") + '</td></tr>').join("") + '</tbody></table>';
       }
 
-      function render() { renderActivity(); renderClusters(); renderAdoption(); renderFieldAgent(); renderTrends(); }
+      function render() { renderActivity(); renderClusters(); renderOperations(); renderAdoption(); renderFieldAgent(); renderTrends(); }
       collectionFilter.addEventListener("change", render);
       runFilter.addEventListener("change", render);
       taskFilter.addEventListener("change", render);

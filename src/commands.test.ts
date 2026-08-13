@@ -23,10 +23,6 @@ describe("standalone command registry", () => {
       "delete",
       "inspect",
       "sample",
-      "collections",
-      "create-collection",
-      "indexes",
-      "create-index",
       "serve",
     ]);
     expect(new Set(commandHandlers.map(({ name }) => name)).size).toBe(

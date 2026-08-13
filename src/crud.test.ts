@@ -27,7 +27,7 @@ function contextWith(
 }
 
 describe("CRUD commands", () => {
-  test("insert uses the default collection and preserves Extended JSON", async () => {
+  test("insert writes to the single memory collection and preserves Extended JSON", async () => {
     const insertOne = mock(async (_document: Document) => ({
       acknowledged: true,
       insertedId: new ObjectId("64b7f0000000000000000001"),
@@ -38,11 +38,11 @@ describe("CRUD commands", () => {
       '{"value":{"$numberLong":"42"}}',
     ]);
 
-    expect(context.db.collection).toHaveBeenCalledWith("default");
+    expect(context.db.collection).toHaveBeenCalledWith("memory");
     expect(insertOne.mock.calls[0][0].value._bsontype).toBe("Long");
     expect(result).toMatchObject({
       acknowledged: true,
-      collection: "default",
+      collection: "memory",
       insertedId: new ObjectId("64b7f0000000000000000001"),
       schemaFingerprint: fingerprintDocument({
         value: Long.fromString("42"),
@@ -50,20 +50,19 @@ describe("CRUD commands", () => {
     });
   });
 
-  test("find accepts an explicit collection and bounded limit", async () => {
+  test("find takes only a filter and a bounded limit", async () => {
     const toArray = mock(async () => [{ value: 1 }]);
     const limit = mock(() => ({ toArray }));
     const find = mock(() => ({ limit }));
     const context = contextWith({ find } as never);
 
     const result = await findCommand.run(context, [
-      "findings",
       '{"kind":"bug"}',
       "--limit",
       "12",
     ]);
 
-    expect(context.db.collection).toHaveBeenCalledWith("findings");
+    expect(context.db.collection).toHaveBeenCalledWith("memory");
     expect(find).toHaveBeenCalledWith(
       { kind: "bug" },
       { promoteValues: false },
@@ -107,7 +106,7 @@ describe("CRUD commands", () => {
       '{"$oid":"64b7f0000000000000000001"}',
     ]);
 
-    expect(context.db.collection).toHaveBeenCalledWith("default");
+    expect(context.db.collection).toHaveBeenCalledWith("memory");
     expect(findOne.mock.calls[0][0]._id).toEqual(document._id);
     expect(result).toEqual(document);
   });
@@ -127,11 +126,10 @@ describe("CRUD commands", () => {
     const context = contextWith({ deleteOne, updateOne } as never);
 
     await updateCommand.run(context, [
-      "items",
       '"key-1"',
       '{"$set":{"done":true}}',
     ]);
-    const result = await deleteCommand.run(context, ["items", '"key-1"']);
+    const result = await deleteCommand.run(context, ['"key-1"']);
 
     expect(updateOne).toHaveBeenCalledWith(
       { _id: "key-1" },
@@ -140,7 +138,7 @@ describe("CRUD commands", () => {
     expect(deleteOne).toHaveBeenCalledWith({ _id: "key-1" });
     expect(result).toEqual({
       acknowledged: true,
-      collection: "items",
+      collection: "memory",
       deletedCount: 1,
     });
   });

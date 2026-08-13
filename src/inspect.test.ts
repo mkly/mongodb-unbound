@@ -49,7 +49,7 @@ describe("describeDocuments", () => {
 });
 
 describe("sampleCommand", () => {
-  test("uses the default collection and enforces the requested bound", async () => {
+  test("samples the single memory collection and enforces the requested bound", async () => {
     let collectionName = "";
     let pipeline: unknown;
     const context = {
@@ -68,10 +68,10 @@ describe("sampleCommand", () => {
 
     const result = await sampleCommand.run(context, ["--size", "7"]);
 
-    expect(collectionName).toBe("default");
+    expect(collectionName).toBe("memory");
     expect(pipeline).toEqual([{ $sample: { size: 7 } }]);
     expect(result).toEqual({
-      collection: "default",
+      collection: "memory",
       documents: [{ value: 1 }],
       requested_size: 7,
     });
@@ -88,38 +88,43 @@ describe("sampleCommand", () => {
 });
 
 describe("inspectCommand", () => {
-  test("inspects user collections and excludes system collections", async () => {
+  test("describes the single memory collection without listing any others", async () => {
+    let collectionName = "";
     const context = {
       db: {
+        // Present and deliberately unused: with one fixed collection there is
+        // nothing to enumerate, and calling this would reintroduce the
+        // per-collection walk the store no longer has.
         listCollections() {
-          return {
-            toArray: async () => [
-              { name: "zeta" },
-              { name: "system.profile" },
-              { name: "alpha" },
-            ],
-          };
+          throw new Error("inspect must not enumerate collections");
         },
         collection(name: string) {
+          collectionName = name;
           return {
             aggregate() {
-              return { toArray: async () => [{ source: name }] };
+              return { toArray: async () => [{ note: "kept" }] };
             },
-            estimatedDocumentCount: async () => 1,
+            estimatedDocumentCount: async () => 3,
           };
         },
       },
     } as unknown as CommandContext;
 
     const result = (await inspectCommand.run(context, [])) as {
-      collections: Record<string, unknown>;
-      inspection: { sample_size: number; truncated: boolean };
+      collection: string;
+      common_fields: Record<string, unknown>;
+      documents: number;
+      inspection: { sample_size: number };
+      sampled_documents: number;
     };
 
-    expect(Object.keys(result.collections)).toEqual(["alpha", "zeta"]);
-    expect(result.inspection).toMatchObject({
-      sample_size: 100,
-      truncated: false,
+    expect(collectionName).toBe("memory");
+    expect(result).toMatchObject({
+      collection: "memory",
+      documents: 3,
+      inspection: { sample_size: 100 },
+      sampled_documents: 1,
     });
+    expect(Object.keys(result.common_fields)).toEqual(["note"]);
   });
 });

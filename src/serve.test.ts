@@ -107,6 +107,64 @@ describe("serve HTTP surface", () => {
     });
   });
 
+  test("counts reads alongside writes without double counting correlated events", async () => {
+    const model = new ObservatoryModel();
+    const telemetry = (id: string, operation: string, success = true) =>
+      ({
+        kind: "activity",
+        id,
+        timestamp: "2026-08-13T20:00:00.000Z",
+        provenance: "telemetry",
+        telemetryType: "unbounded_op",
+        operation,
+        collection: "records",
+        success,
+        attribution: {
+          agentId: "agent_00",
+          condition: "shared",
+          runId: "pilot",
+          taskId: "task",
+        },
+      }) as const;
+
+    model.ingest(telemetry("op-1", "find"));
+    model.ingest(telemetry("op-2", "find"));
+    model.ingest(telemetry("op-3", "insert"));
+    model.ingest(telemetry("op-4", "update", false));
+    // The write's own db_write record and the change-stream event it correlates
+    // with describe operations already counted above; neither may add a row.
+    model.ingest({
+      ...telemetry("op-5", "insert"),
+      telemetryType: "db_write",
+      document: { name: "Ada" },
+    });
+    model.ingest({
+      ...telemetry("op-6", "insert"),
+      provenance: "correlated",
+      telemetryType: "db_write",
+      document: { name: "Ada" },
+    });
+
+    const operations = model.snapshot().observatory.operations;
+    expect(
+      operations.map(({ count, failures, kind, operation }) => ({
+        count,
+        failures,
+        kind,
+        operation,
+      })),
+    ).toEqual([
+      { count: 2, failures: 0, kind: "read", operation: "find" },
+      { count: 1, failures: 0, kind: "write", operation: "insert" },
+      { count: 1, failures: 1, kind: "write", operation: "update" },
+    ]);
+    expect(operations[0]).toMatchObject({
+      agents: ["agent_00"],
+      collection: "records",
+      condition: "shared",
+    });
+  });
+
   test("keeps ingesting when a subscriber throws and drops only that subscriber", () => {
     const model = new ObservatoryModel();
     const healthy: number[] = [];

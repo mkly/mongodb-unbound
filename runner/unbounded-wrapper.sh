@@ -25,13 +25,11 @@ fi
 OP="${1:-none}"
 # Only the operation and collection are recorded. Everything else on the command
 # line is agent-authored document or filter content and is deliberately not
-# logged. The collection is OPTIONAL in every command (`insert [collection]
-# <document>`), so $2 is a collection only when it is not an option and not the
-# JSON document -- otherwise a whole model-authored document would land in the
-# `collection` field, which is both the content we refuse to log and a good way
-# to push the record past PIPE_BUF.
-COLL="${2:-}"
-case "$COLL" in -* | '{'* | '['*) COLL="" ;; esac
+# logged -- putting it in the `collection` field would log the content we refuse
+# to log and push the record past PIPE_BUF. The collection is no longer an
+# argument at all, so it is read solely out of the executable's own output
+# below; argv is never consulted for it.
+COLL=""
 
 START=$(date +%s%3N 2>/dev/null || echo 0)
 OUT=$("$REAL" "$@" 2>&1)
@@ -98,16 +96,10 @@ envelope() {
     case "$OP" in
       insert|update|delete)
         DOC_ID=$(printf '%s' "$OUT" | grep -o '"\$oid":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
-        # Only `insert` echoes an id. For update/delete it is the argument after
-        # the collection -- which the agent may have omitted, so fall back the
-        # same way the executable resolves it.
-        if [ -z "$DOC_ID" ]; then
-          if [ -n "$RESOLVED_COLL" ] && [ "$RESOLVED_COLL" = "${2:-}" ]; then
-            DOC_ID="${3:-}"
-          else
-            DOC_ID="${2:-}"
-          fi
-        fi
+        # Only `insert` echoes an id. `update <id> …` and `delete <id>` take it
+        # as their first argument, and with the collection gone there is no
+        # longer a leading argument that could shift its position.
+        [ -z "$DOC_ID" ] && DOC_ID="${2:-}"
         if [ -n "$DOC_ID" ]; then
           EVENT_ID=$(new_event_id)
           envelope db_write

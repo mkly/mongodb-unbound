@@ -121,6 +121,35 @@ export function parseServeOptions(args: readonly string[]): ServeOptions {
   return { host, port, telemetryPaths: [...new Set(telemetryPaths)] };
 }
 
+// Reads leave no document behind, so they are invisible to every
+// fingerprint-derived view -- yet "did the shared-memory arm ever *look* before
+// writing" is the question the pilot exists to answer. These two sets classify
+// the wrapper's verbs; anything new falls through to "other" rather than being
+// silently counted as a read.
+const READ_OPERATIONS = new Set([
+  "aggregate",
+  "count",
+  "distinct",
+  "find",
+  "get",
+  "inspect",
+  "list",
+  "sample",
+]);
+const WRITE_OPERATIONS = new Set([
+  "delete",
+  "insert",
+  "replace",
+  "update",
+  "upsert",
+]);
+
+function operationKind(operation: string): "other" | "read" | "write" {
+  if (READ_OPERATIONS.has(operation)) return "read";
+  if (WRITE_OPERATIONS.has(operation)) return "write";
+  return "other";
+}
+
 function attribution(
   event: ActivityEvent,
   field: "agentId" | "condition" | "runId" | "taskId",
@@ -207,6 +236,10 @@ export class ObservatoryModel {
       ObservatoryFixture["fingerprints"][number]
     >();
     const activity: ObservatoryFixture["activity"] = [];
+    const operations = new Map<
+      string,
+      ObservatoryFixture["operations"][number]
+    >();
     for (const { event, fingerprint, fields } of observed) {
       const collection = event.collection ?? "unknown";
       const run_id = attribution(event, "runId");
@@ -225,6 +258,44 @@ export class ObservatoryModel {
           task_id,
           timestamp: event.timestamp,
         });
+      }
+      // One row per store operation, counted once. `unbounded_op` is the agent's
+      // own invocation, so it is the primary source; an uncorrelated change-stream
+      // event is a write with no telemetry twin and is counted as well. Everything
+      // else is excluded to avoid double counting: a `correlated` event already has
+      // its `unbounded_op` counterpart in the stream, a `db_write` describes the
+      // same write again, and `model_call`/`run_summary` are not store operations.
+      // `snapshot` is the observatory's own backfill of documents that already
+      // existed when it connected -- our read, not an agent's, so it is excluded.
+      if (
+        event.telemetryType === "unbounded_op" ||
+        (event.provenance === "mongodb" && event.operation !== "snapshot")
+      ) {
+        const operationKey = JSON.stringify([
+          event.operation,
+          collection,
+          run_id,
+          task_id,
+          condition,
+          agent,
+        ]);
+        const currentOperation = operations.get(operationKey);
+        if (currentOperation) {
+          currentOperation.count += 1;
+          if (event.success === false) currentOperation.failures += 1;
+        } else {
+          operations.set(operationKey, {
+            agents,
+            collection,
+            condition,
+            count: 1,
+            failures: event.success === false ? 1 : 0,
+            kind: operationKind(event.operation),
+            operation: event.operation,
+            run_id,
+            task_id,
+          });
+        }
       }
       if (fingerprint === "unknown") continue;
       const key = JSON.stringify([
@@ -321,6 +392,7 @@ export class ObservatoryModel {
         field_agent,
         fingerprints: [...fingerprints.values()],
         generated_at: new Date().toISOString(),
+        operations: [...operations.values()],
         trends,
       },
     };

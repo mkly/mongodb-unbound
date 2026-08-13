@@ -392,6 +392,47 @@ The `install` command above overwrites the placeholder, which is intended — on
 the compiled executable is in place nothing needs Bun at runtime. Drop Bun from
 the container before publishing `unbounded-base` (§7) if you want the image lean.
 
+### One collection, and why the CLI has no way to name another
+
+Every document goes into a single collection, `memory` (`MEMORY_COLLECTION` in
+`src/crud.ts`). The store exposes no way to choose or create another: `insert`,
+`find`, `get`, `update`, `delete`, `sample`, and `inspect` all take no
+collection argument, and the `collections` / `create-collection` / `indexes` /
+`create-index` commands were removed outright.
+
+This is a correction, not an original design. Pilot-002 ran with an optional
+`[collection]` argument and an unprescribed naming choice, and the agents
+promptly invented a different name each for the same concept —
+`tmpdir_issue`, `pytest_tmpdir_issue`, `tmpdir_fix`, `tmpdir`, and separately
+`pylint_issue`, `pylint_issues`, `pylint_bugs`, `pylint_bug`. The result was a
+scatter of one-document collections. That is fatal rather than merely untidy:
+the shared arm's whole mechanism is one agent's `find` reaching another agent's
+write, and a `find` scoped to a collection nobody else guessed reaches nothing.
+The shared and isolated arms become identical by construction, which is exactly
+the failure the task-level memory prompt exists to prevent.
+
+Convergence is still measured, and measured better — on document *shape*, via
+`hashFingerprint()`, which was always the real signal. Collection names were a
+second, noisier proxy for the same thing that happened to also break retrieval.
+
+Consequences worth knowing when reading the code:
+
+- The executable still reports `collection` in its output and the telemetry
+  stream still carries the field. It is now a constant. Keeping it meant the
+  wrapper, `activity.ts`, `serve.ts`, and the Observatory needed no changes.
+- The wrapper no longer reads the collection from `argv` at all — it takes it
+  solely from the executable's output. With the leading argument gone, `$2` is
+  the document id for `update`/`delete`, with nothing that can shift its
+  position.
+- `inspect` no longer walks `listCollections()`, so `MAX_INSPECTION_COLLECTIONS`
+  is gone and its output is one flat description rather than a map keyed by
+  collection name.
+
+**Deploying this is a mid-run hazard on two counts** — it changes both
+`dist/unbounded` (bind-mounted, inode-pinned) and `runner/prompts.py` (read
+fresh by each `swarm.py` invocation). Land it only when *no* arm is running, or
+arm A and arm B run different code and stop being comparable.
+
 ### Getting `unbounded` in front of the agents
 
 Installing it in the pilot container is **not** what puts it on an agent's
@@ -470,6 +511,29 @@ WireGuard, so <http://10.50.180.160:3000> opens directly; no proxy device
 needed. To stop it, `pgrep -f "dist/unbounded-serve"` and then `kill <pid>` in a
 *separate* call — `pkill -f` matches its own `su - agent -c` shell and kills the
 session instead.
+
+The Observatory's **Operations** tab is the read/write view — the one thing no
+fingerprint-derived panel can show, because a read leaves no document behind.
+`serve.ts` classifies each verb through `READ_OPERATIONS` (`aggregate`, `count`,
+`distinct`, `find`, `get`, `inspect`, `list`, `sample`) and `WRITE_OPERATIONS`
+(`delete`, `insert`, `replace`, `update`, `upsert`); anything unrecognised falls
+through to `other` rather than being silently counted as a read.
+
+Counting is the subtle part. An operation is counted iff
+
+```
+telemetryType === "unbounded_op"  ||  (provenance === "mongodb" && operation !== "snapshot")
+```
+
+Every other case is a second description of an event already counted:
+`correlate()` merges a change-stream event with its telemetry twin into ONE
+record with `provenance: "correlated"`, `db_write` re-describes a write whose
+`unbounded_op` was already counted, and `model_call`/`run_summary` are not store
+operations at all — but `telemetryRecord()` sets `operation` to the type name
+when the field is absent, so they masquerade as operations unless excluded. The
+`snapshot` exclusion is separate and easy to miss: that is the Observatory's own
+backfill of documents that existed before it connected. It is *our* read, not an
+agent's. Leaving it in put 11 phantom `other` rows in pilot-002's mix.
 
 Never rebuild `dist/unbounded` while a run is in flight. `swarm.py` bind-mounts
 that file into every agent container and a bind mount pins the inode, so

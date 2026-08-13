@@ -1,14 +1,13 @@
 import type { Document } from "mongodb";
 
-import type { CommandContext, CommandHandler } from "./command.ts";
+import type { CommandHandler } from "./command.ts";
+import { MEMORY_COLLECTION } from "./crud.ts";
 import { CliError } from "./errors.ts";
 import { fingerprintDocument } from "./schema-fingerprint.ts";
 
-const DEFAULT_COLLECTION = "default";
 const DEFAULT_SAMPLE_SIZE = 20;
 const DEFAULT_INSPECTION_SIZE = 100;
 const MAX_SAMPLE_SIZE = 1_000;
-const MAX_INSPECTION_COLLECTIONS = 100;
 
 interface FieldObservation {
   frequency: number;
@@ -46,11 +45,7 @@ function parseBoundedSize(value: string, label: string): number {
   return size;
 }
 
-function parseCollectionAndSize(
-  args: readonly string[],
-  defaultSize: number,
-): { collection: string; collectionSpecified: boolean; size: number } {
-  let collection: string | undefined;
+function parseSize(args: readonly string[], defaultSize: number): number {
   let size = defaultSize;
   let sizeSpecified = false;
 
@@ -79,30 +74,12 @@ function parseCollectionAndSize(
     if (argument.startsWith("-")) {
       invalidArguments(`Unknown option: ${argument}`);
     }
-    if (collection === undefined) {
-      if (/^\d+$/.test(argument)) {
-        if (sizeSpecified)
-          invalidArguments("Sample size may only be specified once");
-        size = parseBoundedSize(argument, "sample size");
-        sizeSpecified = true;
-      } else {
-        collection = argument;
-      }
-      continue;
-    }
-    if (!sizeSpecified) {
-      size = parseBoundedSize(argument, "sample size");
-      sizeSpecified = true;
-      continue;
-    }
-    invalidArguments("Too many arguments");
+    if (sizeSpecified) invalidArguments("Too many arguments");
+    size = parseBoundedSize(argument, "sample size");
+    sizeSpecified = true;
   }
 
-  return {
-    collection: collection ?? DEFAULT_COLLECTION,
-    collectionSpecified: collection !== undefined,
-    size,
-  };
+  return size;
 }
 
 function ratio(count: number, total: number): number {
@@ -174,78 +151,41 @@ export function describeDocuments(
 export const sampleCommand: CommandHandler = {
   name: "sample",
   summary: "Return a bounded random sample of documents",
-  usage: "sample [collection] [size|--size SIZE]",
+  usage: "sample [size|--size SIZE]",
   async run(context, args) {
-    const { collection, size } = parseCollectionAndSize(
-      args,
-      DEFAULT_SAMPLE_SIZE,
-    );
+    const size = parseSize(args, DEFAULT_SAMPLE_SIZE);
     const documents = await context.db
-      .collection(collection)
+      .collection(MEMORY_COLLECTION)
       .aggregate([{ $sample: { size } }], { promoteValues: false })
       .toArray();
 
-    return { collection, documents, requested_size: size };
+    return {
+      collection: MEMORY_COLLECTION,
+      documents,
+      requested_size: size,
+    };
   },
 };
-
-async function inspectCollection(
-  context: CommandContext,
-  collectionName: string,
-  sampleSize: number,
-) {
-  const collection = context.db.collection(collectionName);
-  const [documents, count] = await Promise.all([
-    collection
-      .aggregate([{ $sample: { size: sampleSize } }], { promoteValues: false })
-      .toArray(),
-    collection.estimatedDocumentCount(),
-  ]);
-
-  return {
-    documents: count,
-    ...describeDocuments(documents),
-  };
-}
 
 export const inspectCommand: CommandHandler = {
   name: "inspect",
   summary: "Describe observed fields, BSON types, and document shapes",
-  usage: "inspect [collection] [sample-size|--size SAMPLE_SIZE]",
+  usage: "inspect [sample-size|--size SAMPLE_SIZE]",
   async run(context, args) {
-    const parsed = parseCollectionAndSize(args, DEFAULT_INSPECTION_SIZE);
-    const inspectAll = !parsed.collectionSpecified;
-
-    let names: string[];
-    let truncated = false;
-    if (inspectAll) {
-      const listed = await context.db
-        .listCollections({ type: "collection" }, { nameOnly: true })
-        .toArray();
-      const userCollections = listed
-        .map(({ name }) => name)
-        .filter((name) => !name.startsWith("system."))
-        .sort();
-      truncated = userCollections.length > MAX_INSPECTION_COLLECTIONS;
-      names = userCollections.slice(0, MAX_INSPECTION_COLLECTIONS);
-    } else {
-      names = [parsed.collection];
-    }
-
-    const entries = await Promise.all(
-      names.map(
-        async (name) =>
-          [name, await inspectCollection(context, name, parsed.size)] as const,
-      ),
-    );
+    const size = parseSize(args, DEFAULT_INSPECTION_SIZE);
+    const collection = context.db.collection(MEMORY_COLLECTION);
+    const [documents, count] = await Promise.all([
+      collection
+        .aggregate([{ $sample: { size } }], { promoteValues: false })
+        .toArray(),
+      collection.estimatedDocumentCount(),
+    ]);
 
     return {
-      collections: Object.fromEntries(entries),
-      inspection: {
-        collection_limit: MAX_INSPECTION_COLLECTIONS,
-        sample_size: parsed.size,
-        truncated,
-      },
+      collection: MEMORY_COLLECTION,
+      documents: count,
+      ...describeDocuments(documents),
+      inspection: { sample_size: size },
     };
   },
 };
