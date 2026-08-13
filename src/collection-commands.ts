@@ -41,7 +41,9 @@ function requireDocument<T extends object>(value: unknown, label: string): T {
 }
 
 async function listUserCollections(db: Db): Promise<string[]> {
-  const collections = await db.listCollections({}, { nameOnly: true }).toArray();
+  const collections = await db
+    .listCollections({}, { nameOnly: true })
+    .toArray();
   return collections
     .map(({ name }) => name)
     .filter((name) => !name.startsWith("system."))

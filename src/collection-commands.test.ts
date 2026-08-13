@@ -39,7 +39,9 @@ function stubContext(names: readonly string[]): {
   return { calls, context: { db } as unknown as CommandContext };
 }
 
-async function expectInvalidArguments(run: Promise<unknown>): Promise<CliError> {
+async function expectInvalidArguments(
+  run: Promise<unknown>,
+): Promise<CliError> {
   try {
     await run;
   } catch (error) {
@@ -91,7 +93,9 @@ describe("indexes", () => {
     const { context } = stubContext(["orders", "system.views"]);
 
     expect(await indexesCommand.run(context, [])).toEqual({
-      collections: [{ collection: "orders", indexes: [{ name: "orders_id_" }] }],
+      collections: [
+        { collection: "orders", indexes: [{ name: "orders_id_" }] },
+      ],
     });
   });
 
