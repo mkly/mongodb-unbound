@@ -36,6 +36,15 @@ describe("schema observatory browser interface", () => {
     expect(html).toContain('event.key === "ArrowRight"');
   });
 
+  test("colors fingerprint clusters by contributing agents", () => {
+    const html = renderSchemaObservatory();
+
+    expect(html).toContain("--agent-color:' + agentColor(row.agents) +");
+    expect(html).toContain("const agentKey = (agents) => agents.slice().sort()");
+    expect(html).toContain("agentKeys.indexOf(agentKey(agents))");
+    expect(html).not.toContain("colors[index % colors.length]");
+  });
+
   test("escapes fixture payloads and never requires document values", () => {
     const hostileFixture: ObservatoryFixture = {
       activity: [],

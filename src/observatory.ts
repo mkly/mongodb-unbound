@@ -270,6 +270,10 @@ export function renderSchemaObservatory(
       const filtered = (rows) => rows.filter((row) => (!collectionFilter.value || row.collection === collectionFilter.value) && (!runFilter.value || row.run_id === runFilter.value));
       const unknown = (value, label = "unknown") => value === null || value === undefined ? '<span class="muted">' + label + '</span>' : escapeHtml(value);
       const agentLabel = (agents) => agents.length ? agents.join(", ") : "unknown attribution";
+      const agentKey = (agents) => agents.slice().sort().join(", ");
+      const agentColors = ["var(--cyan)", "var(--accent)", "var(--pink)", "var(--blue)"];
+      const agentKeys = [...new Set(data.fingerprints.map((row) => agentKey(row.agents)))].filter(Boolean).sort();
+      const agentColor = (agents) => { const index = agentKeys.indexOf(agentKey(agents)); return index === -1 ? "var(--muted)" : agentColors[index % agentColors.length]; };
 
       const option = (value) => '<option value="' + escapeHtml(value) + '">' + escapeHtml(value) + '</option>';
       const collections = [...new Set([...data.activity, ...data.fingerprints].map((row) => row.collection))].sort();
@@ -283,10 +287,9 @@ export function renderSchemaObservatory(
       }
 
       function renderClusters() {
-        const colors = ["var(--cyan)", "var(--accent)", "var(--pink)", "var(--blue)"];
         const rows = filtered(data.fingerprints).slice().sort((a, b) => b.count - a.count || a.fingerprint.localeCompare(b.fingerprint));
         const maximum = Math.max(1, ...rows.map((row) => row.count));
-        document.getElementById("clusters").innerHTML = rows.length ? rows.map((row, index) => '<article class="cluster" tabindex="0" style="--size:' + (96 + Math.round(100 * Math.sqrt(row.count / maximum))) + 'px;--agent-color:' + colors[index % colors.length] + '" aria-label="' + escapeHtml(row.fingerprint + ", " + row.count + " observations, " + agentLabel(row.agents)) + '"><strong>' + escapeHtml(row.count) + '</strong><span>' + escapeHtml(row.fingerprint) + '</span><small>' + escapeHtml(agentLabel(row.agents)) + '</small></article>').join("") : '<p class="empty">No fingerprints for these filters.</p>';
+        document.getElementById("clusters").innerHTML = rows.length ? rows.map((row) => '<article class="cluster" tabindex="0" style="--size:' + (96 + Math.round(100 * Math.sqrt(row.count / maximum))) + 'px;--agent-color:' + agentColor(row.agents) + '" aria-label="' + escapeHtml(row.fingerprint + ", " + row.count + " observations, " + agentLabel(row.agents)) + '"><strong>' + escapeHtml(row.count) + '</strong><span>' + escapeHtml(row.fingerprint) + '</span><small>' + escapeHtml(agentLabel(row.agents)) + '</small></article>').join("") : '<p class="empty">No fingerprints for these filters.</p>';
       }
 
       function renderAdoption() {
