@@ -40,7 +40,9 @@ describe("schema observatory browser interface", () => {
     const html = renderSchemaObservatory();
 
     expect(html).toContain("--agent-color:' + agentColor(row.agents) +");
-    expect(html).toContain("const agentKey = (agents) => agents.slice().sort()");
+    expect(html).toContain(
+      "const agentKey = (agents) => agents.slice().sort()",
+    );
     expect(html).toContain("agentKeys.indexOf(agentKey(agents))");
     expect(html).not.toContain("colors[index % colors.length]");
   });
