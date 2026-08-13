@@ -392,6 +392,110 @@ The `install` command above overwrites the placeholder, which is intended — on
 the compiled executable is in place nothing needs Bun at runtime. Drop Bun from
 the container before publishing `unbounded-base` (§7) if you want the image lean.
 
+### Getting `unbounded` in front of the agents
+
+Installing it in the pilot container is **not** what puts it on an agent's
+`PATH`. mini-swe-agent runs each agent inside that instance's own SWE-bench
+Docker container, which has neither Bun nor the binary. The compiled executable
+has to be mounted in, which is why compiling it is load-bearing rather than a
+convenience: one file mounts into forty containers, whereas a source tree would
+mean installing Bun inside every SWE-bench image.
+
+Three mounts per agent container, set through `DockerEnvironmentConfig.run_args`:
+
+```text
+/work/unbounded-pilot/dist/unbounded          -> /opt/unbounded/bin/unbounded  (ro)
+/work/unbounded-pilot/runner/unbounded-wrapper.sh -> /usr/local/bin/unbounded  (ro)
+/work/telemetry                               -> /telemetry                    (rw)
+```
+
+The wrapper occupies the name on `PATH`, appends a telemetry record, then execs
+the real executable at `/opt/unbounded/bin/unbounded`. It is pilot-only: the
+Unbounded executable emits no telemetry and has no concept of runs, agents, or
+conditions, and that separation is deliberate. All experiment attribution comes
+from environment variables the launcher sets — `UNBOUNDED_RUN_ID`,
+`UNBOUNDED_TASK_ID`, `UNBOUNDED_AGENT_ID`, `UNBOUNDED_CONDITION`, and
+`UNBOUNDED_TELEMETRY`. With `UNBOUNDED_TELEMETRY` unset the wrapper is fully
+transparent, which is how the baseline arm runs.
+
+The connection itself comes from `UNBOUNDED_MONGO_URI` and `UNBOUNDED_DB` in the
+container environment. Never pass the URI as an argument — every agent can read
+every other agent's `ps` output.
+
+Verified working end to end inside `sweb.eval.x86_64.pytest-dev_1776_pytest-8365`:
+the binary runs against that image's older glibc, writes to a per-agent Atlas
+database, and produces one JSONL record per call at ~305 bytes.
+
+Records are deliberately kept under 4096 bytes. Concurrent `O_APPEND` writes are
+atomic on Linux only up to `PIPE_BUF`; above it, twenty agents interleave into
+corrupt lines. That is why no document content is ever logged — `document_id`
+plus the change stream recovers it, without replaying model-authored text into a
+browser.
+
+### Choosing the treatment model
+
+The two treatment arms must run the **same** model — that comparison is the
+entire experiment. The baseline arm is a deliberately different reference point
+and is left alone.
+
+`swarm.py --model` overrides arms A and B without editing the arm table:
+
+```bash
+runner/swarm.py --run-id r001 --model openrouter/qwen/qwen3-coder-30b-a3b-instruct \
+                --cost-limit 0.50
+```
+
+Per million tokens, in/out:
+
+| Model | in / out | vs. haiku 4.5 |
+|---|---|---|
+| `openrouter/qwen/qwen3-coder-30b-a3b-instruct` | 0.07 / 0.28 | 14× cheaper |
+| `openrouter/openai/gpt-oss-120b` | 0.03 / 0.17 | 30× cheaper |
+| `openrouter/deepseek/deepseek-v4-flash-0731` | 0.08 / 0.18 | 20× cheaper |
+| `anthropic/claude-haiku-4-5-20251001` | 1.00 / 5.00 | — |
+
+Cost is not the main reason to prefer a small model here. **If the model is
+strong enough to solve these tasks alone, shared memory has no headroom to help**
+and the pilot measures a ceiling effect instead of a treatment effect. The
+opposite risk sets the floor: below some competence threshold neither arm
+completes anything, both score ~0%, and there is no signal either way. Sub-$0.05
+models (`ling-2.6-flash`, `mistral-nemo`, `llama-3.1-8b`) sit below that floor —
+they burn steps on malformed output.
+
+mini-swe-agent does **not** use the tool-calling API. It asks for a bash command
+in a fenced code block and parses the text, so a model's advertised tool-calling
+support is not the constraint — format-following over a long loop is. Confirm a
+candidate emits a clean block before committing 40 agents to it:
+
+```bash
+.venv/bin/python -c '
+import litellm
+r = litellm.completion(model="openrouter/qwen/qwen3-coder-30b-a3b-instruct",
+  messages=[{"role":"user","content":"Reply with a single bash code block that prints hello. Nothing else."}])
+print(repr(r.choices[0].message.content)); print(r.usage)'
+```
+
+LiteLLM reports OpenRouter's own `cost` on the usage object, but mini-swe-agent
+prices calls through LiteLLM's static map, which does not carry these models —
+and it treats an unpriced call as **fatal**, so the first LM call kills the agent:
+
+```
+CRITICAL litellm_model Error calculating cost for model
+openrouter/qwen/qwen3-coder-30b-a3b-instruct: This model isn't mapped yet.
+ERROR swarm A/pytest-dev__pytest-8365/agent_00 failed: RuntimeError
+```
+
+`swarm.py` registers the real per-token prices at startup (`OPENROUTER_PRICES`,
+`register_openrouter_prices`). Do **not** reach for the documented escape hatch
+`MSWEA_COST_TRACKING=ignore_errors` instead — it would zero out `cost_limit` and
+the `estimated_cost` field on every `model_call` record. Adding a new model means
+adding a row to that table.
+
+Two caveats. OpenRouter routes to third-party providers, so latency and rate
+limits are less predictable than Anthropic direct — `swarm.py`'s adaptive
+concurrency governor exists for exactly this. And `OPENROUTER_API_KEY` belongs in
+`/work/.env` alongside the others, never in `incus config set environment.*`.
+
 ---
 
 ## 4.5 Connecting to MongoDB Atlas
@@ -406,7 +510,21 @@ Verified with the Atlas CLI:
 | Cluster | `Cluster0`, **M10**, MongoDB 8.0.29, AWS `US_WEST_1`, IDLE, 10 GB, backups on |
 | SRV host | `cluster0.kyk94d.mongodb.net` |
 | Access list | `44.231.18.79/32` (crabbox-ec2) and `12.78.75.210/32` — both present |
-| Database user | `unbounded`, `readWrite@unbounded` — created, connection verified |
+| Database user | `unbounded`, `readWriteAnyDatabase@admin` — created, connection verified |
+
+**Why the role is `readWriteAnyDatabase` and not `readWrite@unbounded`.** It
+started as the narrower grant, which is the right instinct — the swarm runs
+model-authored shell commands under that account. But the experiment gives each
+isolated-arm agent its own database (`{run_id}_agent_07`), and `readWrite` on a
+single database named `unbounded` fails auth on every one of them:
+
+```text
+not authorized on run_001_agent_07 to execute command { insert: ... }
+```
+
+`readWriteAnyDatabase` is still well below `atlasAdmin`: no user management, no
+cluster administration, no access-list changes. Rotate this password after the
+pilot (§8) — it is the only credential the model-authored commands can reach.
 
 Re-check any time with:
 
