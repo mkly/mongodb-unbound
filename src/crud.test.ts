@@ -59,9 +59,26 @@ describe("CRUD commands", () => {
     ]);
 
     expect(context.db.collection).toHaveBeenCalledWith("findings");
-    expect(find).toHaveBeenCalledWith({ kind: "bug" });
+    expect(find).toHaveBeenCalledWith(
+      { kind: "bug" },
+      { promoteValues: false },
+    );
     expect(limit).toHaveBeenCalledWith(12);
     expect(result).toEqual([{ value: 1 }]);
+  });
+
+  test("find and get keep BSON types unpromoted so output round-trips", async () => {
+    const toArray = mock(async () => []);
+    const limit = mock(() => ({ toArray }));
+    const find = mock((_filter: Document, _options?: unknown) => ({ limit }));
+    const findOne = mock(async (_filter: Document, _options?: unknown) => null);
+    const context = contextWith({ find, findOne } as never);
+
+    await findCommand.run(context, ["{}"]);
+    await getCommand.run(context, ['{"$oid":"64b7f0000000000000000001"}']);
+
+    expect(find.mock.calls[0][1]).toEqual({ promoteValues: false });
+    expect(findOne.mock.calls[0][1]).toEqual({ promoteValues: false });
   });
 
   test("find rejects limits above the runtime bound", async () => {
