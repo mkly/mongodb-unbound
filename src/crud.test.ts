@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { ObjectId, type Collection, type Db, type Document } from "mongodb";
+import { Long, ObjectId, type Collection, type Db, type Document } from "mongodb";
 
 import type { CommandContext } from "./command.ts";
 import {
@@ -10,6 +10,7 @@ import {
   updateCommand,
 } from "./crud.ts";
 import type { CliError } from "./errors.ts";
+import { fingerprintDocument } from "./schema-fingerprint.ts";
 
 function contextWith(
   collection: Partial<Collection<Document>>,
@@ -39,9 +40,13 @@ describe("CRUD commands", () => {
 
     expect(context.db.collection).toHaveBeenCalledWith("default");
     expect(insertOne.mock.calls[0][0].value._bsontype).toBe("Long");
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       acknowledged: true,
+      collection: "default",
       insertedId: new ObjectId("64b7f0000000000000000001"),
+      schemaFingerprint: fingerprintDocument({
+        value: Long.fromString("42"),
+      }).hash,
     });
   });
 
@@ -133,6 +138,60 @@ describe("CRUD commands", () => {
       { $set: { done: true } },
     );
     expect(deleteOne).toHaveBeenCalledWith({ _id: "key-1" });
-    expect(result).toEqual({ acknowledged: true, deletedCount: 1 });
+    expect(result).toEqual({
+      acknowledged: true,
+      collection: "items",
+      deletedCount: 1,
+    });
+  });
+
+  test("get, update and delete accept the bare id insert prints", async () => {
+    const findOne = mock(async (_filter: Document) => null);
+    const updateOne = mock(async () => ({ acknowledged: true }));
+    const deleteOne = mock(async () => ({ acknowledged: true }));
+    const context = contextWith({ deleteOne, findOne, updateOne } as never);
+    const hex = "64b7f0000000000000000001";
+
+    await getCommand.run(context, [hex]);
+    await updateCommand.run(context, [hex, "{}"]);
+    await deleteCommand.run(context, [hex]);
+
+    for (const call of [findOne, updateOne, deleteOne]) {
+      expect(call.mock.calls[0][0]).toEqual({ _id: new ObjectId(hex) });
+    }
+  });
+
+  test("update wraps an operator-free document so it sets rather than replaces", async () => {
+    const updateOne = mock(async () => ({ acknowledged: true }));
+    const context = contextWith({ updateOne } as never);
+
+    await updateCommand.run(context, ['"key-1"', '{"done":true}']);
+
+    expect(updateOne.mock.calls[0][1]).toEqual({ $set: { done: true } });
+  });
+
+  test("update fingerprints the fields it writes, however they were spelled", async () => {
+    const updateOne = mock(async () => ({ acknowledged: true }));
+    const context = contextWith({ updateOne } as never);
+
+    const plain = await updateCommand.run(context, [
+      '"key-1"',
+      '{"done":true}',
+    ]);
+    const operators = await updateCommand.run(context, [
+      '"key-1"',
+      '{"$set":{"done":true}}',
+    ]);
+    const removal = await updateCommand.run(context, [
+      '"key-1"',
+      '{"$unset":{"done":""}}',
+    ]);
+
+    expect((plain as Document).schemaFingerprint).toBe(
+      (operators as Document).schemaFingerprint,
+    );
+    // An update that writes no fields describes no shape, so it reports none
+    // rather than a fingerprint of `{}` that would cluster with empty inserts.
+    expect((removal as Document).schemaFingerprint).toBeUndefined();
   });
 });

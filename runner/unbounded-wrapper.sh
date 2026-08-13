@@ -23,10 +23,15 @@ if [ -z "$UNBOUNDED_TELEMETRY" ]; then
 fi
 
 OP="${1:-none}"
+# Only the operation and collection are recorded. Everything else on the command
+# line is agent-authored document or filter content and is deliberately not
+# logged. The collection is OPTIONAL in every command (`insert [collection]
+# <document>`), so $2 is a collection only when it is not an option and not the
+# JSON document -- otherwise a whole model-authored document would land in the
+# `collection` field, which is both the content we refuse to log and a good way
+# to push the record past PIPE_BUF.
 COLL="${2:-}"
-# Only the first two positional arguments are recorded. Everything after them is
-# agent-authored document or filter content and is deliberately not logged.
-case "$COLL" in -*) COLL="" ;; esac
+case "$COLL" in -* | '{'* | '['*) COLL="" ;; esac
 
 START=$(date +%s%3N 2>/dev/null || echo 0)
 OUT=$("$REAL" "$@" 2>&1)
@@ -56,30 +61,24 @@ esac
 
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
-# Schema fingerprint: sha256 over the document's sorted top-level key names,
-# truncated to 16 hex. Fixed length and free of model-authored text, so it is
-# safe to log where the document itself is not -- and it is what makes schema
-# convergence visible in the stream rather than only in a post-hoc pass over
-# MongoDB. Key NAMES only; no values, and nested structure is not descended.
+# The executable reports the collection it resolved and, for insert/update, a
+# `schemaFingerprint` -- a 16 hex digest of the document's field names and BSON
+# types. Fixed length and free of model-authored text, so it is safe to log
+# where the document itself is not, and it makes schema convergence visible in
+# the stream rather than only in a post-hoc pass over MongoDB.
 #
-# Every SWE-bench Lite container is a Python repo, so python3 is present. If it
-# somehow is not, or the document does not parse, the field is simply omitted --
-# a missing fingerprint must never cost us the db_write record.
-FINGERPRINT=""
-fingerprint_of() {
-  [ -n "$1" ] || return 0
-  printf '%s' "$1" | python3 -c '
-import hashlib, json, sys
-try:
-    doc = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-if not isinstance(doc, dict):
-    sys.exit(0)
-keys = ",".join(sorted(k for k in doc if k != "_id"))
-sys.stdout.write(hashlib.sha256(keys.encode()).hexdigest()[:16])
-' 2>/dev/null
+# Both are READ OUT of the output rather than recomputed here. A second
+# fingerprint implementation in shell would drift from the executable's, and the
+# two would no longer cluster the same documents together -- which is the one
+# thing the convergence measurement depends on. Absent fields are simply
+# omitted; missing telemetry must never cost us the record.
+field_of() {
+  printf '%s' "$OUT" | grep -o "\"$1\":\"[A-Za-z0-9_.-]*\"" | head -1 | cut -d'"' -f4
 }
+
+RESOLVED_COLL=$(field_of collection)
+[ -n "$RESOLVED_COLL" ] && COLL="$RESOLVED_COLL"
+FINGERPRINT=$(field_of schemaFingerprint)
 
 envelope() {
   printf '{"type":"%s","event_id":"%s","timestamp":"%s","run_id":"%s","task_id":"%s","agent_id":"%s","condition":"%s"' \
@@ -98,13 +97,17 @@ envelope() {
   if [ "$SUCCESS" = true ]; then
     case "$OP" in
       insert|update|delete)
-        # `insert <collection> <document>` vs `update <collection> <id> <document>`.
-        case "$OP" in
-          insert) FINGERPRINT=$(fingerprint_of "${3:-}") ;;
-          update) FINGERPRINT=$(fingerprint_of "${4:-}") ;;
-        esac
         DOC_ID=$(printf '%s' "$OUT" | grep -o '"\$oid":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
-        [ -z "$DOC_ID" ] && DOC_ID="${3:-}"
+        # Only `insert` echoes an id. For update/delete it is the argument after
+        # the collection -- which the agent may have omitted, so fall back the
+        # same way the executable resolves it.
+        if [ -z "$DOC_ID" ]; then
+          if [ -n "$RESOLVED_COLL" ] && [ "$RESOLVED_COLL" = "${2:-}" ]; then
+            DOC_ID="${3:-}"
+          else
+            DOC_ID="${2:-}"
+          fi
+        fi
         if [ -n "$DOC_ID" ]; then
           EVENT_ID=$(new_event_id)
           envelope db_write

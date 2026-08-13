@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Binary, Decimal128, Long, ObjectId } from "mongodb";
 
-import { fingerprintDocument } from "./schema-fingerprint.ts";
+import { fingerprintDocument, hashFingerprint } from "./schema-fingerprint.ts";
 
 describe("fingerprintDocument", () => {
   test("canonicalizes nested objects independently of field order and values", () => {
@@ -95,6 +95,30 @@ describe("fingerprintDocument", () => {
   test("keeps dotted field names distinct from nested paths", () => {
     expect(fingerprintDocument({ "profile.name": "Ada" }).fingerprint).not.toBe(
       fingerprintDocument({ profile: { name: "Ada" } }).fingerprint,
+    );
+  });
+});
+
+describe("hashFingerprint", () => {
+  test("is the fixed-length key the telemetry stream logs in place of the shape", () => {
+    const { fingerprint, hash } = fingerprintDocument({
+      note: "long enough to matter",
+      tags: ["a", "b"],
+    });
+
+    expect(hash).toBe(hashFingerprint(fingerprint));
+    expect(hash).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  test("agrees exactly with itself across documents of the same shape", () => {
+    // The whole convergence measurement is a join on this value between the
+    // pilot's JSONL and a later pass over MongoDB, so same shape must mean
+    // same hash and different shape must mean different hash.
+    expect(fingerprintDocument({ a: 1, b: "x" }).hash).toBe(
+      fingerprintDocument({ b: "y", a: 2 }).hash,
+    );
+    expect(fingerprintDocument({ a: 1 }).hash).not.toBe(
+      fingerprintDocument({ a: "1" }).hash,
     );
   });
 });

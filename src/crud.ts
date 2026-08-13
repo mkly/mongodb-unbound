@@ -3,6 +3,7 @@ import type { Document, Filter, UpdateFilter } from "mongodb";
 import type { CommandHandler } from "./command.ts";
 import { parseEjson, parseId } from "./ejson.ts";
 import { CliError } from "./errors.ts";
+import { fingerprintDocument } from "./schema-fingerprint.ts";
 
 export const DEFAULT_COLLECTION = "default";
 export const DEFAULT_FIND_LIMIT = 100;
@@ -37,6 +38,19 @@ function parseDocument(input: string, label: string): Document {
 function toUpdateFilter(update: Document): Document {
   const usesOperators = Object.keys(update).some((key) => key.startsWith("$"));
   return usesOperators ? update : { $set: update };
+}
+
+// The fields an update actually writes, so its shape is comparable with an
+// insert's. `{"a":1}` and `{"$set":{"a":1}}` describe the same shape and must
+// fingerprint the same; an update that only removes or increments fields
+// describes no shape at all.
+function updatedFields(update: Document): Document | undefined {
+  const usesOperators = Object.keys(update).some((key) => key.startsWith("$"));
+  if (!usesOperators) return update;
+  const set = update.$set;
+  return set !== null && typeof set === "object" && !Array.isArray(set)
+    ? (set as Document)
+    : undefined;
 }
 
 function parseCollectionAndValues(
@@ -113,10 +127,20 @@ export const insertCommand: CommandHandler = {
       1,
       "unbounded insert [collection] <document>",
     );
+    const document = parseDocument(parsed.values[0], "document");
     const result = await context.db
       .collection(parsed.collection)
-      .insertOne(parseDocument(parsed.values[0], "document"));
-    return { acknowledged: result.acknowledged, insertedId: result.insertedId };
+      .insertOne(document);
+    return {
+      acknowledged: result.acknowledged,
+      collection: parsed.collection,
+      insertedId: result.insertedId,
+      // Reported so the telemetry wrapper can read the shape off our output
+      // instead of re-deriving it from argv with a second implementation.
+      schemaFingerprint: fingerprintDocument(document, {
+        generatedId: result.insertedId,
+      }).hash,
+    };
   },
 };
 
@@ -169,8 +193,13 @@ export const updateCommand: CommandHandler = {
         { _id: id } as Filter<Document>,
         toUpdateFilter(update) as UpdateFilter<Document>,
       );
+    const fields = updatedFields(update);
     return {
       acknowledged: result.acknowledged,
+      collection: parsed.collection,
+      ...(fields === undefined
+        ? {}
+        : { schemaFingerprint: fingerprintDocument(fields).hash }),
       matchedCount: result.matchedCount,
       modifiedCount: result.modifiedCount,
       upsertedCount: result.upsertedCount,
@@ -195,6 +224,7 @@ export const deleteCommand: CommandHandler = {
       .deleteOne({ _id: id } as Filter<Document>);
     return {
       acknowledged: result.acknowledged,
+      collection: parsed.collection,
       deletedCount: result.deletedCount,
     };
   },

@@ -427,13 +427,26 @@ the binary runs against that image's older glibc, writes to a per-agent Atlas
 database, and produces one JSONL record per call at ~305 bytes.
 
 Successful writes also carry `schema_fingerprint` — first 16 hex of a sha256 over
-the document's sorted top-level key names, `_id` excluded. Fixed-length and free
-of model-authored text, so it clears both constraints that keep document content
-out of the log, and it is what makes schema convergence visible in the stream
-rather than only in a post-hoc pass over MongoDB. The wrapper shells out to
-`python3` for the parse, which every SWE-bench Lite container has since they are
-all Python repos; an unparseable or non-object document omits the field rather
-than losing the `db_write` record.
+the document's structural signature (field paths and BSON types, `_id` excluded
+when the server generated it). Fixed-length and free of model-authored text, so
+it clears both constraints that keep document content out of the log, and it is
+what makes schema convergence visible in the stream rather than only in a
+post-hoc pass over MongoDB.
+
+The executable computes it — `insert` and `update` now report `collection` and
+`schemaFingerprint` in their result — and the wrapper reads both out of that
+output. This matters more than it looks: `inspect` clusters documents already in
+MongoDB by the same `fingerprintDocument()` hash, so the JSONL stream and a
+post-hoc pass over the database join on one key. An earlier revision recomputed
+the fingerprint in shell from a different algorithm (sorted key names only, via
+`python3`), which produced values that could never be compared with `inspect`'s.
+Do not reintroduce a second implementation.
+
+Reading `collection` from the output also fixes a leak: the collection argument
+is optional in every command, so `unbounded insert '{"note":"…"}'` used to log
+the whole model-authored document in the `collection` field — exactly the content
+the design refuses to log, and enough to push a record past `PIPE_BUF`. Absent
+fields are simply omitted; missing telemetry never costs us the record.
 
 Records are deliberately kept under 4096 bytes. Concurrent `O_APPEND` writes are
 atomic on Linux only up to `PIPE_BUF`; above it, twenty agents interleave into

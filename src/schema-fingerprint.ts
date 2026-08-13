@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { BSON, type Document } from "mongodb";
 
 export interface FingerprintOptions {
@@ -11,6 +13,17 @@ export interface FingerprintOptions {
 export interface DocumentFingerprint {
   fields: Record<string, string>;
   fingerprint: string;
+  hash: string;
+}
+
+// The readable `fingerprint` signature is unbounded in length and made of
+// model-authored field names, so it cannot go into a telemetry record: those
+// must stay under PIPE_BUF to keep concurrent appends atomic. `hash` is the
+// same shape as a fixed 16 hex characters, so the pilot's JSONL stream and a
+// post-hoc `inspect` over MongoDB cluster documents by the *same* key -- which
+// only holds because both come from this one function.
+export function hashFingerprint(signature: string): string {
+  return createHash("sha256").update(signature).digest("hex").slice(0, 16);
 }
 
 interface TypeDescription {
@@ -146,8 +159,6 @@ export function fingerprintDocument(
       .map(([path, signatures]) => [path, union(signatures)]),
   );
 
-  return {
-    fields,
-    fingerprint: `document{${rootFields.join(",")}}`,
-  };
+  const fingerprint = `document{${rootFields.join(",")}}`;
+  return { fields, fingerprint, hash: hashFingerprint(fingerprint) };
 }
