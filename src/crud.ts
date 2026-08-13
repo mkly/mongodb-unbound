@@ -1,7 +1,7 @@
 import type { Document, Filter, UpdateFilter } from "mongodb";
 
 import type { CommandHandler } from "./command.ts";
-import { parseEjson } from "./ejson.ts";
+import { parseEjson, parseId } from "./ejson.ts";
 import { CliError } from "./errors.ts";
 
 export const DEFAULT_COLLECTION = "default";
@@ -27,6 +27,16 @@ function parseDocument(input: string, label: string): Document {
     invalidArguments(`${label} must be an Extended JSON document`);
   }
   return value as Document;
+}
+
+// `updateOne` rejects a plain document -- it requires atomic operators. But the
+// command is documented as `update [collection] <id> <update>`, so a plain
+// document is the obvious thing to pass, and rejecting it is a worse answer than
+// doing what was meant. A document with no top-level `$` key is treated as the
+// fields to set; anything using operators is passed through untouched.
+function toUpdateFilter(update: Document): Document {
+  const usesOperators = Object.keys(update).some((key) => key.startsWith("$"));
+  return usesOperators ? update : { $set: update };
 }
 
 function parseCollectionAndValues(
@@ -134,7 +144,7 @@ export const getCommand: CommandHandler = {
       1,
       "unbounded get [collection] <id>",
     );
-    const id = parseEjson<unknown>(parsed.values[0], "_id");
+    const id = parseId(parsed.values[0]);
     return await context.db
       .collection(parsed.collection)
       .findOne({ _id: id } as Filter<Document>, { promoteValues: false });
@@ -151,13 +161,13 @@ export const updateCommand: CommandHandler = {
       2,
       "unbounded update [collection] <id> <update>",
     );
-    const id = parseEjson<unknown>(parsed.values[0], "_id");
+    const id = parseId(parsed.values[0]);
     const update = parseDocument(parsed.values[1], "update");
     const result = await context.db
       .collection(parsed.collection)
       .updateOne(
         { _id: id } as Filter<Document>,
-        update as UpdateFilter<Document>,
+        toUpdateFilter(update) as UpdateFilter<Document>,
       );
     return {
       acknowledged: result.acknowledged,
@@ -179,7 +189,7 @@ export const deleteCommand: CommandHandler = {
       1,
       "unbounded delete [collection] <id>",
     );
-    const id = parseEjson<unknown>(parsed.values[0], "_id");
+    const id = parseId(parsed.values[0]);
     const result = await context.db
       .collection(parsed.collection)
       .deleteOne({ _id: id } as Filter<Document>);

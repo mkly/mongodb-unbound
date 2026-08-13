@@ -500,6 +500,35 @@ ERROR swarm A/pytest-dev__pytest-8365/agent_00 failed: RuntimeError
 the `estimated_cost` field on every `model_call` record. Adding a new model means
 adding a row to that table.
 
+**Measured result: stay on haiku.** Both models were run against
+`pytest-dev__pytest-8365` with byte-identical prompts:
+
+| | qwen3-coder-30b | haiku 4.5 |
+|---|---|---|
+| LM calls | 77 (step limit) | 40 |
+| Wall clock | 445 s | 117 s |
+| Cost | $0.072 | $0.124 |
+| Submitted a diff | no | yes, 11 lines |
+| `unbounded` calls | **0** | 6 (2 writes, 2 distinct fingerprints) |
+
+qwen found the correct fix — catching `KeyError` around `getpass.getuser()` — and
+then submitted raw source instead of a `git diff`, so nothing scoreable came out.
+It also never once invoked `unbounded` across 77 steps. Both are the same failure:
+it reasons adequately but does not hold protocol over a long loop. The zero is
+disqualifying on its own, because **an agent that never writes to memory makes the
+shared and isolated arms identical by construction** — the pilot would return a
+null result caused by the model rather than by the hypothesis.
+
+Haiku on the identical prompt searched before working (`find notes`,
+`inspect tmpdir`) and then wrote, which is the behaviour the experiment needs.
+
+The cost argument also collapses on the real numbers: at $0.12 per episode, 120
+episodes (20 agents × 3 instances × 2 arms) is about $15. Cheaper models are not
+worth a null result to save ten dollars. Keep the `--model` flag for when a
+candidate worth testing appears, and re-run this same two-model comparison before
+trusting one — a model that cannot follow the submission protocol cannot run this
+pilot regardless of price.
+
 Two caveats. OpenRouter routes to third-party providers, so latency and rate
 limits are less predictable than Anthropic direct — `swarm.py`'s adaptive
 concurrency governor exists for exactly this. And `OPENROUTER_API_KEY` belongs in
