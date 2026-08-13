@@ -60,6 +60,42 @@ schema, or format are prescribed; `inspect` and `sample` are how you find out
 what is there."""
 
 
+#: Task-level reminder, appended to `agent.instance_template`. Appended VERBATIM
+#: for both `shared` and `isolated`, omitted for `baseline` -- same single edit
+#: point discipline as MEMORY_PROMPT.
+#:
+#: This exists because the builtin swebench.yaml carries a one-line system prompt
+#: and puts all workflow direction in the instance template. A memory section
+#: stated once at the top and never again is placement a small model will ignore:
+#: a 40-step smoke run of qwen3-coder-30b touched `unbounded` zero times. If the
+#: agents never use memory, the shared and isolated arms are identical by
+#: construction and the pilot measures nothing.
+#:
+#: It instructs WHEN to reach for memory, never WHAT to store. Collection names
+#: and schema are what the experiment measures, so prescribing them would destroy
+#: the result.
+TASK_MEMORY_PROMPT: Final[str] = """\
+
+Before you begin, check `unbounded` for anything relevant to this task; other
+engineers may already have recorded something useful. Before you submit, record
+what you learned. Choose the collections, structure, and wording yourself."""
+
+
+def build_instance_prompt(condition: str, base_template: str) -> str:
+    """Return the `agent.instance_template` for `condition`.
+
+    `base_template` is mini-swe-agent's builtin template, returned unchanged for
+    the baseline arm. "shared" and "isolated" are byte-identical by construction.
+    """
+    if condition in ("shared", "isolated"):
+        return f"{base_template}\n{TASK_MEMORY_PROMPT}\n"
+    if condition == "baseline":
+        return base_template
+    raise ValueError(
+        f"unknown condition {condition!r}; expected one of {CONDITIONS}"
+    )
+
+
 def build_system_prompt(condition: str) -> str:
     """Return the complete `agent.system_template` string for `condition`.
 

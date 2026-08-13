@@ -426,6 +426,15 @@ Verified working end to end inside `sweb.eval.x86_64.pytest-dev_1776_pytest-8365
 the binary runs against that image's older glibc, writes to a per-agent Atlas
 database, and produces one JSONL record per call at ~305 bytes.
 
+Successful writes also carry `schema_fingerprint` — first 16 hex of a sha256 over
+the document's sorted top-level key names, `_id` excluded. Fixed-length and free
+of model-authored text, so it clears both constraints that keep document content
+out of the log, and it is what makes schema convergence visible in the stream
+rather than only in a post-hoc pass over MongoDB. The wrapper shells out to
+`python3` for the parse, which every SWE-bench Lite container has since they are
+all Python repos; an unparseable or non-object document omits the field rather
+than losing the `db_write` record.
+
 Records are deliberately kept under 4096 bytes. Concurrent `O_APPEND` writes are
 atomic on Linux only up to `PIPE_BUF`; above it, twenty agents interleave into
 corrupt lines. That is why no document content is ever logged — `document_id`

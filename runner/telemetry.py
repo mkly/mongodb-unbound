@@ -59,7 +59,7 @@ TYPE_FIELDS: dict[str, tuple[str, ...]] = {
 OPTIONAL_TYPE_FIELDS: dict[str, tuple[str, ...]] = {
     "model_call": (),
     "unbounded_op": (),
-    "db_write": ("fingerprint",),
+    "db_write": ("schema_fingerprint",),
     "run_summary": (),
 }
 

@@ -59,7 +59,7 @@ from minisweagent.utils.serialize import recursive_merge  # noqa: E402
 from telemetry import TelemetryWriter, telemetry_path  # noqa: E402
 
 try:
-    from prompts import build_system_prompt
+    from prompts import build_instance_prompt, build_system_prompt
 except ImportError:  # pragma: no cover - prompts.py is owned by another agent
     def build_system_prompt(condition: str) -> str:
         """Placeholder used only when ``runner/prompts.py`` is not importable."""
@@ -67,6 +67,10 @@ except ImportError:  # pragma: no cover - prompts.py is owned by another agent
             "PLACEHOLDER SYSTEM PROMPT -- runner/prompts.py was not importable. "
             f"condition={condition}. Do not run a real experiment with this."
         )
+
+    def build_instance_prompt(condition: str, base_template: str) -> str:
+        """Placeholder used only when ``runner/prompts.py`` is not importable."""
+        return base_template
 
 logger = logging.getLogger("swarm")
 
@@ -280,7 +284,15 @@ def build_config(job: Job, run_id: str, telemetry_dir: Path, *, step_limit: int,
             "run_args": build_run_args(job, telemetry_dir, telemetry_mount),
         },
     }
-    return recursive_merge(get_config_from_spec(BUILTIN_CONFIG), overrides)
+    config = recursive_merge(get_config_from_spec(BUILTIN_CONFIG), overrides)
+    # The memory reminder has to be appended to the builtin instance template
+    # rather than set in `overrides`, since the builtin text is the thing being
+    # extended. Stating memory only in the one-line system prompt is placement a
+    # small model ignores -- a 40-step smoke run touched `unbounded` zero times.
+    agent_config = config.setdefault("agent", {})
+    if base_template := agent_config.get("instance_template"):
+        agent_config["instance_template"] = build_instance_prompt(job.spec.condition, base_template)
+    return config
 
 
 # --------------------------------------------------------------------------- #

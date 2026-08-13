@@ -661,7 +661,7 @@ Per type, in addition to the envelope:
 ```text
 model_call      model, input_tokens, output_tokens, estimated_cost, step
 unbounded_op    operation, collection, success, exit_code, duration_ms
-db_write        operation, collection, document_id, fingerprint?
+db_write        operation, collection, document_id, schema_fingerprint?
 run_summary     wall_clock_ms, resolved, patch_size_lines, f2p_passed, p2p_passed
 ```
 
@@ -681,8 +681,32 @@ reasons not to:
   document values by default.
 
 `document_id` plus the change stream recovers everything a document field would
-have provided. `fingerprint` is optional and only populated when the writer can
-compute one cheaply; readers must treat its absence as normal.
+have provided.
+
+## The schema fingerprint
+
+None of the above blocks logging the *shape* of a write, and shape is what the
+pilot is actually trying to observe. `schema_fingerprint` is the first 16 hex
+characters of a sha256 over the document's sorted top-level key names, with `_id`
+excluded. Key names only; values never, and nested structure is not descended.
+
+It is fixed-length, so it cannot break `PIPE_BUF` atomicity, and it contains no
+model-authored text, so it is safe to render. Both objections to logging document
+content are therefore answered, and a `db_write` record stays under 300 bytes.
+
+This is what makes schema convergence visible **in the stream**, in real time,
+rather than only in a post-hoc pass over MongoDB. Sorting the keys means agents
+that chose the same fields in a different order collide to one fingerprint, which
+is the definition of convergence worth counting. The distribution of fingerprints
+per collection tightening over a run is the signal; comparing that tightening
+between the shared and isolated arms is the result.
+
+Field-level detail beyond the fingerprint — which fields, what they contain, how
+wording drifted — still comes from reading MongoDB directly afterwards. The
+fingerprint is the live indicator, not a replacement for that pass.
+
+It remains optional: unparseable or non-object documents omit the field rather
+than losing the record, and readers must treat its absence as normal.
 
 ## Correlating the two sources
 

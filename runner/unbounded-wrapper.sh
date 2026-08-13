@@ -56,6 +56,31 @@ esac
 
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
+# Schema fingerprint: sha256 over the document's sorted top-level key names,
+# truncated to 16 hex. Fixed length and free of model-authored text, so it is
+# safe to log where the document itself is not -- and it is what makes schema
+# convergence visible in the stream rather than only in a post-hoc pass over
+# MongoDB. Key NAMES only; no values, and nested structure is not descended.
+#
+# Every SWE-bench Lite container is a Python repo, so python3 is present. If it
+# somehow is not, or the document does not parse, the field is simply omitted --
+# a missing fingerprint must never cost us the db_write record.
+FINGERPRINT=""
+fingerprint_of() {
+  [ -n "$1" ] || return 0
+  printf '%s' "$1" | python3 -c '
+import hashlib, json, sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not isinstance(doc, dict):
+    sys.exit(0)
+keys = ",".join(sorted(k for k in doc if k != "_id"))
+sys.stdout.write(hashlib.sha256(keys.encode()).hexdigest()[:16])
+' 2>/dev/null
+}
+
 envelope() {
   printf '{"type":"%s","event_id":"%s","timestamp":"%s","run_id":"%s","task_id":"%s","agent_id":"%s","condition":"%s"' \
     "$1" "$EVENT_ID" "$TS" "$(esc "$UNBOUNDED_RUN_ID")" "$(esc "$UNBOUNDED_TASK_ID")" \
@@ -73,13 +98,20 @@ envelope() {
   if [ "$SUCCESS" = true ]; then
     case "$OP" in
       insert|update|delete)
+        # `insert <collection> <document>` vs `update <collection> <id> <document>`.
+        case "$OP" in
+          insert) FINGERPRINT=$(fingerprint_of "${3:-}") ;;
+          update) FINGERPRINT=$(fingerprint_of "${4:-}") ;;
+        esac
         DOC_ID=$(printf '%s' "$OUT" | grep -o '"\$oid":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
         [ -z "$DOC_ID" ] && DOC_ID="${3:-}"
         if [ -n "$DOC_ID" ]; then
           EVENT_ID=$(new_event_id)
           envelope db_write
-          printf ',"operation":"%s","collection":"%s","document_id":"%s"}\n' \
+          printf ',"operation":"%s","collection":"%s","document_id":"%s"' \
             "$(esc "$OP")" "$(esc "$COLL")" "$(esc "$DOC_ID")"
+          [ -n "$FINGERPRINT" ] && printf ',"schema_fingerprint":"%s"' "$FINGERPRINT"
+          printf '}\n'
         fi
         ;;
     esac
