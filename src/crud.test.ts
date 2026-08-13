@@ -70,8 +70,10 @@ describe("CRUD commands", () => {
   test("find and get keep BSON types unpromoted so output round-trips", async () => {
     const toArray = mock(async () => []);
     const limit = mock(() => ({ toArray }));
-    const find = mock(() => ({ limit }));
-    const findOne = mock(async () => null);
+    const find = mock((_filter: Document, _options?: unknown) => ({ limit }));
+    const findOne = mock(
+      async (_filter: Document, _options?: unknown) => null,
+    );
     const context = contextWith({ find, findOne } as never);
 
     await findCommand.run(context, ["{}"]);
