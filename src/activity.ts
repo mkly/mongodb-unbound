@@ -307,6 +307,8 @@ export class MongoDbActivityAdapter implements MongoActivityAdapter {
         ? {}
         : { resumeAfter: options.resumeAfter as Document }),
     });
+    const closeOnAbort = () => settle(cursor.close());
+    options.signal?.addEventListener("abort", closeOnAbort, { once: true });
     try {
       for await (const change of cursor) {
         throwIfAborted(options.signal);
@@ -315,6 +317,7 @@ export class MongoDbActivityAdapter implements MongoActivityAdapter {
           yield normalized;
       }
     } finally {
+      options.signal?.removeEventListener("abort", closeOnAbort);
       await cursor.close();
     }
   }

@@ -47,6 +47,7 @@ collections
 create-collection <collection>
 indexes [collection]
 create-index <collection> <keys-ejson> [options-ejson]
+serve [--host HOST] [--port PORT] [--telemetry PATH]...
 ```
 
 When a CRUD, `sample`, or single-collection `inspect` command omits its
@@ -135,6 +136,71 @@ interface labels them as such rather than displaying zero. The exported
 `observatoryFixture` supplies deterministic representative data for rendering
 and integration tests. A live source can append normalized activity in the
 browser with `window.unboundedObservatory.pushEvent(event)`.
+
+## Serve the live Schema Observatory
+
+`unbounded serve` opens the embedded dashboard and observes the configured
+database without writing to it. It binds to `127.0.0.1:3000` by default. Use
+`--host` or `--port` to change the listener, and repeat `--telemetry PATH` to
+follow one or more agent JSONL files:
+
+```sh
+unbounded serve \
+  --telemetry telemetry/shared-01/agent-ada.jsonl \
+  --telemetry telemetry/shared-01/agent-babbage.jsonl
+```
+
+Open `http://127.0.0.1:3000/`. The page supports collection, run, task, agent,
+and condition filters. Its browser API is deliberately small and versioned:
+
+- `GET /health` reports process health.
+- `GET /v1/snapshot` returns `{api_version:"v1", diagnostics, observatory}`.
+- `GET /v1/events` is a server-sent-event stream whose `snapshot` events use
+  the same envelope and update the page as MongoDB or telemetry changes arrive.
+
+The server reads a bounded initial snapshot of each user collection, follows a
+database change stream, and computes canonical structural fingerprints and
+convergence metrics in memory. It never creates an observer collection or
+stores metadata in MongoDB. Changes without matching telemetry remain visible
+with unknown attribution; unknown and insufficient metrics are `null`, never
+fabricated as zero.
+
+MongoDB change streams require a replica set or sharded cluster. Atlas supports
+them, but the connecting user must be allowed to read the database and open a
+change stream. A standalone local `mongod` cannot provide live change events;
+use a local replica set for the full demo. The default loopback bind keeps the
+dashboard private to the machine. Binding to a non-loopback address exposes
+structural metadata and telemetry attribution without authentication, so put it
+behind an authenticated tunnel or reverse proxy and do not expose it directly
+to an untrusted network.
+
+Telemetry files use a shared JSONL envelope. Every record has `type`,
+`event_id`, `timestamp`, `run_id`, `task_id`, `agent_id`, and `condition`.
+The four record types and their writers are:
+
+- `model_call`: written by `runner/swarm.py` around each model invocation.
+- `unbounded_op`: written by `runner/unbounded-wrapper.sh` around a CLI call.
+- `db_write`: written by the wrapper after a successful write, providing the
+  attribution that is correlated with MongoDB's authoritative change event.
+- `run_summary`: written by `runner/swarm.py` when a run finishes.
+
+The Unbounded executable itself emits no telemetry. Malformed lines, incomplete
+envelopes, unknown record types, and stream disconnects appear in the snapshot's
+`diagnostics` array and do not stop observation.
+
+For a copy-paste local demo, start a MongoDB replica set, export the connection
+variables shown above, then run:
+
+```sh
+mkdir -p /tmp/unbounded-telemetry
+: > /tmp/unbounded-telemetry/agent-demo.jsonl
+unbounded serve --telemetry /tmp/unbounded-telemetry/agent-demo.jsonl
+```
+
+In another terminal, use the database walkthrough below or append telemetry
+records using the runner. The browser updates without a reload. Stop the server
+with Ctrl-C; it closes HTTP clients, file followers, the change stream, and the
+MongoDB connection.
 
 ## Copy-paste database walkthrough
 

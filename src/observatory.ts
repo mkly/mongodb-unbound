@@ -2,41 +2,51 @@ export interface ObservatoryActivity {
   action: "delete" | "insert" | "replace" | "update";
   agents: string[];
   collection: string;
+  condition: string;
   fingerprint: string;
   run_id: string;
+  task_id: string;
   timestamp: string;
 }
 
 export interface ObservatoryFingerprint {
   agents: string[];
   collection: string;
+  condition: string;
   count: number;
   fields: string[];
   fingerprint: string;
   run_id: string;
+  task_id: string;
 }
 
 export interface ObservatoryAdoption {
   agent: string | null;
   collection: string;
+  condition: string;
   fingerprint: string;
   first_seen: string;
   run_id: string;
+  task_id: string;
 }
 
 export interface ObservatoryFieldAgent {
   agent: string;
   collection: string;
+  condition: string;
   field: string;
   frequency: number | null;
   run_id: string;
+  task_id: string;
 }
 
 export interface ObservatoryTrend {
   collection: string;
+  condition: string;
   effective_schemas: number | null;
   inter_agent_divergence: number | null;
   run_id: string;
+  task_id: string;
   timestamp: string;
   temporal_stability: number | null;
 }
@@ -61,24 +71,30 @@ export const observatoryFixture: ObservatoryFixture = {
       action: "insert",
       agents: ["agent-ada"],
       collection: "projects",
+      condition: "shared",
       fingerprint: "project-core",
       run_id: "shared-01",
+      task_id: "task-01",
       timestamp: "2026-08-13T19:55:00.000Z",
     },
     {
       action: "update",
       agents: ["agent-babbage"],
       collection: "projects",
+      condition: "shared",
       fingerprint: "project-status",
       run_id: "shared-01",
+      task_id: "task-01",
       timestamp: "2026-08-13T19:56:00.000Z",
     },
     {
       action: "replace",
       agents: [],
       collection: "notes",
+      condition: "shared",
       fingerprint: "note-basic",
       run_id: "shared-01",
+      task_id: "task-01",
       timestamp: "2026-08-13T19:57:00.000Z",
     },
   ],
@@ -86,103 +102,129 @@ export const observatoryFixture: ObservatoryFixture = {
     {
       agents: ["agent-ada", "agent-babbage"],
       collection: "projects",
+      condition: "shared",
       count: 18,
       fields: ["name:string", "status:string", "tags:array<string>"],
       fingerprint: "project-core",
       run_id: "shared-01",
+      task_id: "task-01",
     },
     {
       agents: ["agent-babbage"],
       collection: "projects",
+      condition: "shared",
       count: 7,
       fields: ["name:string", "status:string", "owner:string"],
       fingerprint: "project-status",
       run_id: "shared-01",
+      task_id: "task-01",
     },
     {
       agents: [],
       collection: "notes",
+      condition: "shared",
       count: 4,
       fields: ["title:string", "body:string"],
       fingerprint: "note-basic",
       run_id: "shared-01",
+      task_id: "task-01",
     },
   ],
   adoption: [
     {
       agent: "agent-ada",
       collection: "projects",
+      condition: "shared",
       fingerprint: "project-core",
       first_seen: "2026-08-13T19:55:00.000Z",
       run_id: "shared-01",
+      task_id: "task-01",
     },
     {
       agent: "agent-babbage",
       collection: "projects",
+      condition: "shared",
       fingerprint: "project-core",
       first_seen: "2026-08-13T19:56:30.000Z",
       run_id: "shared-01",
+      task_id: "task-01",
     },
     {
       agent: null,
       collection: "notes",
+      condition: "shared",
       fingerprint: "note-basic",
       first_seen: "2026-08-13T19:57:00.000Z",
       run_id: "shared-01",
+      task_id: "task-01",
     },
   ],
   field_agent: [
     {
       agent: "agent-ada",
       collection: "projects",
+      condition: "shared",
       field: "name",
       frequency: 1,
       run_id: "shared-01",
+      task_id: "task-01",
     },
     {
       agent: "agent-babbage",
       collection: "projects",
+      condition: "shared",
       field: "name",
       frequency: 1,
       run_id: "shared-01",
+      task_id: "task-01",
     },
     {
       agent: "agent-ada",
       collection: "projects",
+      condition: "shared",
       field: "owner",
       frequency: null,
       run_id: "shared-01",
+      task_id: "task-01",
     },
     {
       agent: "agent-babbage",
       collection: "projects",
+      condition: "shared",
       field: "owner",
       frequency: 0.39,
       run_id: "shared-01",
+      task_id: "task-01",
     },
   ],
   trends: [
     {
       collection: "projects",
+      condition: "shared",
       effective_schemas: 1.8,
       inter_agent_divergence: 0.24,
       run_id: "shared-01",
+      task_id: "task-01",
       temporal_stability: 0.82,
       timestamp: "2026-08-13T19:55:00.000Z",
     },
     {
       collection: "projects",
+      condition: "shared",
       effective_schemas: 1.5,
       inter_agent_divergence: 0.16,
       run_id: "shared-01",
+      task_id: "task-01",
       temporal_stability: 0.91,
       timestamp: "2026-08-13T19:57:00.000Z",
     },
     {
       collection: "notes",
+      condition: "shared",
       effective_schemas: 1,
       inter_agent_divergence: null,
       run_id: "shared-01",
+      task_id: "task-01",
       temporal_stability: null,
       timestamp: "2026-08-13T19:57:00.000Z",
     },
@@ -243,6 +285,9 @@ export function renderSchemaObservatory(
     <div class="filters" aria-label="Data filters">
       <label>Collection<select id="collection-filter"><option value="">All collections</option></select></label>
       <label>Run<select id="run-filter"><option value="">All runs</option></select></label>
+      <label>Task<select id="task-filter"><option value="">All tasks</option></select></label>
+      <label>Agent<select id="agent-filter"><option value="">All agents</option></select></label>
+      <label>Condition<select id="condition-filter"><option value="">All conditions</option></select></label>
     </div>
   </header>
   <main>
@@ -266,20 +311,35 @@ export function renderSchemaObservatory(
       const data = JSON.parse(document.getElementById("observatory-data").textContent);
       const collectionFilter = document.getElementById("collection-filter");
       const runFilter = document.getElementById("run-filter");
+      const taskFilter = document.getElementById("task-filter");
+      const agentFilter = document.getElementById("agent-filter");
+      const conditionFilter = document.getElementById("condition-filter");
       const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#39;"})[char]);
-      const filtered = (rows) => rows.filter((row) => (!collectionFilter.value || row.collection === collectionFilter.value) && (!runFilter.value || row.run_id === runFilter.value));
+      const rowAgents = (row) => row.agents || (row.agent ? [row.agent] : []);
+      const filtered = (rows) => rows.filter((row) => (!collectionFilter.value || row.collection === collectionFilter.value) && (!runFilter.value || row.run_id === runFilter.value) && (!taskFilter.value || row.task_id === taskFilter.value) && (!agentFilter.value || rowAgents(row).includes(agentFilter.value)) && (!conditionFilter.value || row.condition === conditionFilter.value));
       const unknown = (value, label = "unknown") => value === null || value === undefined ? '<span class="muted">' + label + '</span>' : escapeHtml(value);
       const agentLabel = (agents) => agents.length ? agents.join(", ") : "unknown attribution";
       const agentKey = (agents) => agents.slice().sort().join(", ");
       const agentColors = ["var(--cyan)", "var(--accent)", "var(--pink)", "var(--blue)"];
-      const agentKeys = [...new Set(data.fingerprints.map((row) => agentKey(row.agents)))].filter(Boolean).sort();
+      let agentKeys = [];
       const agentColor = (agents) => { const index = agentKeys.indexOf(agentKey(agents)); return index === -1 ? "var(--muted)" : agentColors[index % agentColors.length]; };
 
       const option = (value) => '<option value="' + escapeHtml(value) + '">' + escapeHtml(value) + '</option>';
-      const collections = [...new Set([...data.activity, ...data.fingerprints].map((row) => row.collection))].sort();
-      const runs = [...new Set([...data.activity, ...data.fingerprints].map((row) => row.run_id))].sort();
-      collectionFilter.insertAdjacentHTML("beforeend", collections.map(option).join(""));
-      runFilter.insertAdjacentHTML("beforeend", runs.map(option).join(""));
+      function syncOptions(select, values) {
+        const selected = select.value;
+        const all = select.options[0].outerHTML;
+        select.innerHTML = all + values.map(option).join("");
+        select.value = values.includes(selected) ? selected : "";
+      }
+      function syncFilters() {
+        agentKeys = [...new Set(data.fingerprints.map((row) => agentKey(row.agents)))].filter(Boolean).sort();
+        const allRows = [...data.activity, ...data.fingerprints, ...data.adoption, ...data.field_agent, ...data.trends];
+        syncOptions(collectionFilter, [...new Set([...data.activity, ...data.fingerprints].map((row) => row.collection).filter(Boolean))].sort());
+        syncOptions(runFilter, [...new Set(allRows.map((row) => row.run_id).filter(Boolean))].sort());
+        syncOptions(taskFilter, [...new Set(allRows.map((row) => row.task_id).filter(Boolean))].sort());
+        syncOptions(agentFilter, [...new Set(allRows.flatMap(rowAgents).filter(Boolean))].sort());
+        syncOptions(conditionFilter, [...new Set(allRows.map((row) => row.condition).filter(Boolean))].sort());
+      }
 
       function renderActivity() {
         const rows = filtered(data.activity).slice().sort((a, b) => b.timestamp.localeCompare(a.timestamp));
@@ -316,13 +376,25 @@ export function renderSchemaObservatory(
       function render() { renderActivity(); renderClusters(); renderAdoption(); renderFieldAgent(); renderTrends(); }
       collectionFilter.addEventListener("change", render);
       runFilter.addEventListener("change", render);
+      taskFilter.addEventListener("change", render);
+      agentFilter.addEventListener("change", render);
+      conditionFilter.addEventListener("change", render);
 
       const tabs = [...document.querySelectorAll('[role="tab"]')];
       function selectTab(tab) { for (const item of tabs) { const selected = item === tab; item.setAttribute("aria-selected", String(selected)); item.tabIndex = selected ? 0 : -1; document.getElementById(item.getAttribute("aria-controls")).hidden = !selected; } tab.focus(); }
       tabs.forEach((tab, index) => { tab.addEventListener("click", () => selectTab(tab)); tab.addEventListener("keydown", (event) => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length; selectTab(tabs[next]); }); });
 
-      window.unboundedObservatory = { pushEvent(event) { data.activity.push(event); renderActivity(); } };
+      window.unboundedObservatory = {
+        pushEvent(event) { data.activity.push(event); syncFilters(); renderActivity(); },
+        replaceSnapshot(snapshot) { Object.assign(data, snapshot); syncFilters(); render(); }
+      };
+      syncFilters();
       render();
+      fetch("/v1/snapshot").then((response) => response.json()).then((snapshot) => window.unboundedObservatory.replaceSnapshot(snapshot.observatory)).catch(() => {});
+      if (typeof EventSource === "function") {
+        const events = new EventSource("/v1/events");
+        events.addEventListener("snapshot", (event) => { try { window.unboundedObservatory.replaceSnapshot(JSON.parse(event.data).observatory); } catch { /* ignore malformed frame */ } });
+      }
     })();
   </script>
 </body>
