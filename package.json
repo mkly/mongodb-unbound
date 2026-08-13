@@ -1,0 +1,25 @@
+{
+  "name": "unbounded-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "unbounded": "./src/cli.ts"
+  },
+  "scripts": {
+    "build": "bun build ./src/cli.ts --compile --target=bun-linux-x64 --outfile ./dist/unbounded",
+    "check": "bun run typecheck && bun run lint && bun run format:check",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "mongodb": "6.18.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.1.4",
+    "@types/bun": "1.2.19",
+    "typescript": "5.9.2"
+  }
+}
