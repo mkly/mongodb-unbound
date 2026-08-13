@@ -39,7 +39,7 @@ import sys
 import threading
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +121,36 @@ class ArmSpec:
         if self.condition == "isolated":
             return f"{run_id}_{agent_id}"
         return None
+
+
+# LiteLLM's price map does not carry these OpenRouter models, and mini-swe-agent
+# treats an unpriced call as fatal rather than as a missing number. Registering
+# the real per-token prices keeps `cost_limit` and the `model_call` telemetry
+# meaningful, which suppressing the error would not. Prices are USD per token.
+OPENROUTER_PRICES: dict[str, tuple[float, float]] = {
+    "qwen/qwen3-coder-30b-a3b-instruct": (0.07e-6, 0.28e-6),
+    "qwen/qwen3-coder": (0.30e-6, 1.00e-6),
+    "qwen/qwen3-coder-next": (0.12e-6, 0.80e-6),
+    "openai/gpt-oss-120b": (0.03e-6, 0.17e-6),
+    "deepseek/deepseek-v4-flash-0731": (0.08e-6, 0.18e-6),
+    "google/gemini-2.5-flash-lite": (0.10e-6, 0.40e-6),
+    "z-ai/glm-4.6": (0.50e-6, 2.00e-6),
+}
+
+
+def register_openrouter_prices() -> None:
+    """Teach LiteLLM the prices for the OpenRouter models this pilot may use."""
+    import litellm
+
+    for name, (prompt_cost, completion_cost) in OPENROUTER_PRICES.items():
+        litellm.register_model({
+            f"openrouter/{name}": {
+                "input_cost_per_token": prompt_cost,
+                "output_cost_per_token": completion_cost,
+                "litellm_provider": "openrouter",
+                "mode": "chat",
+            }
+        })
 
 
 ARMS: dict[str, ArmSpec] = {
@@ -590,7 +620,7 @@ def print_evaluation_commands(run_id: str, arm: str, agent_paths: list[Path], in
     """Print the exact scoring commands. Scoring is a separate step; never run here."""
     print(f"\n# scoring for arm {arm} ({len(agent_paths)} candidate sets) -- run these separately:")
     for path in agent_paths:
-        agent_id = path.stem.rsplit("_", 2)[-2] + "_" + path.stem.rsplit("_", 1)[-1]
+        agent_id = path.stem.split("_", 2)[2]  # preds_<arm>_<agent_id>
         print(
             "python -m swebench.harness.run_evaluation"
             " --dataset_name princeton-nlp/SWE-bench_Lite"
@@ -664,7 +694,6 @@ def run_arm(spec: ArmSpec, instances: list[dict[str, Any]], args: argparse.Names
             except JobFailed as failure:
                 stats.add(cost=float(failure.result.get("cost") or 0.0))
                 if is_rate_limit_error(failure.cause) and attempt < args.max_retries and not stop.is_set():
-                    governor.release()
                     governor.record_rate_limit()
                     logger.warning("%s hit back-pressure; retry %d/%d", job.label, attempt + 1, args.max_retries)
                     continue
@@ -752,7 +781,8 @@ def dry_run(specs: list[ArmSpec], instances: list[dict[str, Any]], args: argpars
               f"= {len(jobs)} runs =====")
         for instance in instances:
             print(f"  image {get_swebench_docker_image_name(instance)}")
-        for job in (jobs[0], jobs[-1]):
+        samples = [jobs[0]] + ([jobs[-1]] if jobs[-1].label != jobs[0].label else [])
+        for job in samples:
             config = build_config(
                 job, args.run_id, telemetry_dir,
                 step_limit=args.step_limit, wall_time_limit=args.wall_time_limit,
@@ -780,6 +810,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--split", default=DEFAULT_SPLIT, help="Dataset split")
     parser.add_argument("--results-root", default=str(REPO_ROOT / "results"), help="Root for per-run results")
     parser.add_argument("--telemetry-root", default=str(REPO_ROOT / "telemetry"), help="Root for per-run telemetry")
+    parser.add_argument("--model", default=None, help="Override the model for arms A and B (leaves the baseline alone)")
+    parser.add_argument("--cost-limit", type=float, default=None, help="Override the per-agent cost limit for arms A and B")
     parser.add_argument("--dry-run", action="store_true", help="Assemble configs and exit without running anything")
     parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
     return parser.parse_args(argv)
@@ -792,11 +824,26 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-7s %(name)s %(message)s",
     )
     os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
+    register_openrouter_prices()
 
     if loaded := load_env_file(ENV_FILE):
         logger.info("loaded %d variables from %s: %s", len(loaded), ENV_FILE, ", ".join(sorted(loaded)))
 
     specs = [ARMS[args.arm]] if args.arm != "all" else [ARMS["A"], ARMS["B"], ARMS["C"]]
+    # The treatment arms must share a model for the comparison to mean anything;
+    # the baseline is a deliberately different reference point and is left alone.
+    if args.model or args.cost_limit is not None:
+        specs = [
+            s if s.condition == "baseline"
+            else replace(
+                s,
+                model_name=args.model or s.model_name,
+                cost_limit=args.cost_limit if args.cost_limit is not None else s.cost_limit,
+            )
+            for s in specs
+        ]
+        for s in specs:
+            logger.info("arm %s: model=%s cost_limit=%.2f", s.arm, s.model_name, s.cost_limit)
     needs_mongo = any(s.condition != "baseline" for s in specs)
     if missing := check_secrets(needs_mongo=needs_mongo):
         message = f"missing required environment variables: {', '.join(missing)}"
