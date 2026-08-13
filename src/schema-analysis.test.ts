@@ -111,6 +111,19 @@ describe("grouping and attribution", () => {
     });
   });
 
+  test("treats undefined filter values as unconstrained", () => {
+    const result = analyzeSchemaObservations(
+      [observation(0, "a", { run_id: "run-1" })],
+      {
+        filters: { collection: "records", run_id: undefined },
+        window_ms: minute,
+      },
+    );
+
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0].observation_count).toBe(1);
+  });
+
   test("reports per-agent distributions, fields, adoption, and unknown attribution", () => {
     const result = analyzeSchemaObservations(
       [

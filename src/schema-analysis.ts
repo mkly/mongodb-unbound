@@ -208,9 +208,15 @@ function passesFilters(
   filters: SchemaAnalysisFilter,
 ): boolean {
   const entries = Object.entries(filters) as Array<
-    [keyof SchemaAnalysisFilter, string | null | readonly (string | null)[]]
+    [
+      keyof SchemaAnalysisFilter,
+      string | null | readonly (string | null)[] | undefined,
+    ]
   >;
   return entries.every(([dimension, expected]) => {
+    // An explicitly undefined filter means "unconstrained", not "match null";
+    // callers build filters straight from optional flags.
+    if (expected === undefined) return true;
     const value = observation[dimension] ?? null;
     return matches(value, expected);
   });
@@ -483,8 +489,9 @@ export function analyzeSchemaObservations(
       JSON.stringify(left.key).localeCompare(JSON.stringify(right.key)),
     )
     .map(({ key, values }) => {
-      const first = Math.min(...values.map((value) => value.timestamp));
-      const last = Math.max(...values.map((value) => value.timestamp));
+      const timestamps = values.map((value) => value.timestamp);
+      const first = timestamps.reduce((low, value) => Math.min(low, value));
+      const last = timestamps.reduce((high, value) => Math.max(high, value));
       const start =
         requestedStart ??
         Math.floor(first / options.window_ms) * options.window_ms;
