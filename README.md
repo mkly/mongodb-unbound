@@ -120,6 +120,22 @@ unbounded --help
 Copy that one file to other compatible machines; neither this repository nor a
 JavaScript runtime needs to accompany it.
 
+## Embedded Schema Observatory interface
+
+`src/observatory.ts` exports `renderSchemaObservatory`, which returns one
+self-contained HTML document with inline styles, browser behavior, and fixture
+data. It has no CDN or browser-package dependency, so a server command can embed
+the returned string in the compiled executable and serve it directly.
+
+The typed `ObservatoryFixture` contract contains only structural observations:
+activity metadata, fingerprint names and field/type paths, adoption times,
+field frequencies, and convergence metrics. It intentionally has no place for
+document values. `null` metric values mean unknown or insufficient data and the
+interface labels them as such rather than displaying zero. The exported
+`observatoryFixture` supplies deterministic representative data for rendering
+and integration tests. A live source can append normalized activity in the
+browser with `window.unboundedObservatory.pushEvent(event)`.
+
 ## Copy-paste database walkthrough
 
 With a reachable MongoDB instance and the environment variables above, this
