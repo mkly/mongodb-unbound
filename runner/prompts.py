@@ -88,17 +88,57 @@ is prescribed; `inspect` and `sample` are how you find out what is there."""
 #: Note the cost -- every `unbounded` call spends one step from `--step-limit`.
 #: Raise the limit when raising write frequency, or the extra writes come
 #: straight out of the budget for solving the bug.
+#:
+#: THE READ SIDE NEEDS THE SAME TREATMENT. Naming five write moments against a
+#: single read clause weights the prompt 5:1, and a measured ratio follows it
+#: closely: an earlier run held 1.20:1 reads:writes, and the run after this list
+#: was added inverted to 0.69:1 (42 reads, 61 writes across 20 agents). Every
+#: agent used the store and every agent opened with a read -- then went
+#: write-only. Reads were front-loaded into the first one or two operations and
+#: almost never repeated.
+#:
+#: Three causes, only the first of which is the 5:1 weighting:
+#:
+#: 1. The prompt asked for more writes and left reads alone.
+#: 2. The opening read returned an empty store. Under concurrency the first wave
+#:    all query within seconds of each other, before anyone has written. A read
+#:    that costs a step and returns nothing teaches the agent that reading does
+#:    not pay, and it never tries again.
+#: 3. Re-reading has no cheap trigger. Once an agent has read, it carries the
+#:    content in context; a second read only pays if someone else wrote since,
+#:    which the agent cannot know without spending a step to find out.
+#:
+#: Hence the three additions below, each aimed at one cause. All three are
+#: WHEN/HOW guidance only -- naming conventions, title formats, and document
+#: structure stay out, because prescribing structure manufactures the convergence
+#: this pilot exists to observe.
+#:
+#: * "Finding nothing is a normal result" inoculates against cause 2. Stated
+#:   outright because an agent that reads cost-for-nothing once stops entirely.
+#: * "Look up the thing that broke, not the task" gives a recurring read trigger
+#:   with a DIFFERENT query than the opening one, addressing cause 3. An agent
+#:   stuck on an error has a concrete new thing to look up.
+#: * The negative write criterion counters the amplification the five moments
+#:   introduced; the list had no filter at all, which is how writes came to
+#:   outnumber reads.
 TASK_MEMORY_PROMPT: Final[str] = """\
 
 Before you begin, check `unbounded` for anything relevant to this task; other
-engineers may already have recorded something useful, and it is worth checking
-again whenever you change direction.
+engineers may already have recorded something useful. Finding nothing is a normal
+result, not a sign the store is broken or useless -- someone may write the thing
+you needed a minute after you looked, so check again as you go.
+
+Check again whenever you change direction, and especially whenever you get stuck.
+When something breaks, look up the thing that broke -- the error text, the failing
+test, the function you are stuck in -- rather than the task as a whole. Another
+engineer who hit the same wall filed it under the wall, not under their task.
 
 Record what you learn as you learn it, rather than saving it all for the end:
 when you locate the relevant code, when a hypothesis is ruled out, when a test
 fails or passes, when you edit a file, and when you finish. Anything you keep
-only in your own context is lost when this task ends. Choose the structure and
-wording yourself."""
+only in your own context is lost when this task ends. Skip what another engineer
+could not act on -- a mistake you corrected a minute later, or anything that only
+makes sense inside your own session. Choose the structure and wording yourself."""
 
 
 def build_instance_prompt(condition: str, base_template: str) -> str:
