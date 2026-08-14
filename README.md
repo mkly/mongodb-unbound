@@ -249,3 +249,4 @@ disconnects produce `kind: "diagnostic"` records instead of terminating the
 stream. JSONL is deduplicated by `event_id`; MongoDB changes are deduplicated by
 resume token and reconnect from the last token. A partial trailing JSONL line is
 held until a following append completes it.
+# mongodb-unbound
